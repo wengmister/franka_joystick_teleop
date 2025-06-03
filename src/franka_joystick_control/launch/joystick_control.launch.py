@@ -19,12 +19,6 @@ def generate_launch_description():
         description='Port number for communication with realtime PC'
     )
     
-    use_python_arg = DeclareLaunchArgument(
-        'use_python',
-        default_value='true',
-        description='Use Python version (true) or C++ version (false)'
-    )
-    
     # Joy node for joystick input
     joy_node = Node(
         package='joy',
@@ -36,7 +30,7 @@ def generate_launch_description():
         }]
     )
     
-    # Python joystick publisher (default)
+    # Python joystick publisher
     joystick_node = Node(
         package='franka_joystick_control',
         executable='franka_joystick_publisher',
