@@ -40,12 +40,13 @@ private:
     const int PORT = 8888;
     
     // Movement limits
-    const double MAX_LINEAR_VEL = 0.02;  // Reduced to 2cm/s max
-    const double MAX_ANGULAR_VEL = 0.05; // Reduced to 0.05 rad/s max
-    const double SMOOTHING_FACTOR = 0.1; // Velocity smoothing factor
+    const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max as you set
+    const double MAX_ANGULAR_VEL = 0.05;  // Keep angular at 0.05 rad/s max
+    const double SMOOTHING_FACTOR = 0.05; // Much more aggressive smoothing (was 0.1)
     
     // Smoothed velocities for continuity
     std::array<double, 6> smoothed_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    std::array<double, 6> prev_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     
 public:
     ModernFrankaController() {
@@ -104,7 +105,9 @@ public:
                     
                     // Debug output for non-zero commands
                     if (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || std::abs(cmd.linear_z) > 0.01) {
-                        std::cout << "Joystick: [" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
+                        std::cout << "Joystick: Left[" << cmd.linear_x << "," << cmd.linear_y 
+                                  << "] Right[" << cmd.linear_z << "] -> Robot[fwd=" << cmd.linear_y 
+                                  << ", right=" << -cmd.linear_x << ", up=" << cmd.linear_z << "]" << std::endl;
                     }
                 }
             }
@@ -160,15 +163,17 @@ public:
                     cmd = current_command_;
                 }
                 
-                // Convert joystick commands to target velocities
-                double target_v_x = cmd.linear_x * MAX_LINEAR_VEL;
-                double target_v_y = cmd.linear_y * MAX_LINEAR_VEL;
-                double target_v_z = cmd.linear_z * MAX_LINEAR_VEL;
+                // Convert joystick commands to target velocities with corrected mapping
+                // Left stick: up/down = forward/backward (Y axis), left/right = left/right (X axis)
+                double target_v_x = cmd.linear_y * MAX_LINEAR_VEL;  // Up/down -> forward/backward
+                double target_v_y = -cmd.linear_x * MAX_LINEAR_VEL; // Left/right -> left/right (negated)
+                double target_v_z = cmd.linear_z * MAX_LINEAR_VEL;  // Right stick vertical -> up/down
                 double target_omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
                 double target_omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
                 double target_omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
                 
                 // Apply exponential smoothing to prevent discontinuities
+                // More aggressive smoothing for stability
                 smoothed_velocities_[0] += SMOOTHING_FACTOR * (target_v_x - smoothed_velocities_[0]);
                 smoothed_velocities_[1] += SMOOTHING_FACTOR * (target_v_y - smoothed_velocities_[1]);
                 smoothed_velocities_[2] += SMOOTHING_FACTOR * (target_v_z - smoothed_velocities_[2]);
@@ -178,9 +183,22 @@ public:
                 
                 // Apply deadzone to smoothed values
                 for (int i = 0; i < 6; i++) {
-                    if (std::abs(smoothed_velocities_[i]) < 0.001) { // 1mm/s deadzone
+                    if (std::abs(smoothed_velocities_[i]) < 0.002) { // 2mm/s deadzone
                         smoothed_velocities_[i] = 0.0;
                     }
+                }
+                
+                // Additional acceleration limiting - clamp velocity changes
+                const double MAX_VEL_CHANGE = 0.001; // Max change per cycle: 1mm/s
+                
+                for (int i = 0; i < 6; i++) {
+                    double vel_change = smoothed_velocities_[i] - prev_velocities_[i];
+                    if (vel_change > MAX_VEL_CHANGE) {
+                        smoothed_velocities_[i] = prev_velocities_[i] + MAX_VEL_CHANGE;
+                    } else if (vel_change < -MAX_VEL_CHANGE) {
+                        smoothed_velocities_[i] = prev_velocities_[i] - MAX_VEL_CHANGE;
+                    }
+                    prev_velocities_[i] = smoothed_velocities_[i];
                 }
                 
                 franka::CartesianVelocities output = {{
@@ -220,11 +238,12 @@ public:
                     std::cout << "Running error recovery..." << std::endl;
                     robot.automaticErrorRecovery();
                     
-                    // Reset smoothed velocities after error recovery
+                    // Reset smoothed velocities but keep prev_velocities to avoid discontinuity
                     std::fill(smoothed_velocities_.begin(), smoothed_velocities_.end(), 0.0);
+                    // DON'T reset prev_velocities_ - let them naturally decay to zero
                     
                     std::cout << "Restarting control loop..." << std::endl;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Brief pause
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Longer pause
                 }
             }
             
