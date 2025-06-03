@@ -1,4 +1,4 @@
-# Franka Robot Joystick Control Setup (Python-Only)
+# Franka Robot Joystick Control Setup
 
 This system allows you to control a Franka robot using a joystick through ROS2 on your local machine, communicating with libfranka running on a realtime PC at **192.168.18.1**.
 
@@ -18,84 +18,19 @@ Local Machine (ROS2)           Ethernet (UDP)        Realtime PC (192.168.18.1)
 
 ## Setup Instructions
 
-### 1. Realtime PC Setup (192.168.18.1)
+### 1. Realtime PC Setup (Assumed 192.168.18.1)
 
-1. **SSH into your realtime PC**:
-   ```bash
-   ssh user@192.168.18.1
-   ```
-
-2. **Install libfranka** (if not already installed):
-   ```bash
-   sudo apt install libfranka-dev
-   ```
-
-3. **Create and compile the Franka controller**:
-   ```bash
-   # Copy the franka_joystick_control.cpp file to the realtime PC
-   g++ -std=c++17 franka_joystick_control.cpp -lfranka -lpthread -o franka_joystick_control
-   ```
+Under construction.
 
 ### 2. Local Machine Setup (Python Package)
 
-1. **Install ROS2** (Humble recommended) and joy package:
-   ```bash
-   sudo apt install ros-humble-desktop ros-humble-joy
-   ```
+Under construction
 
-2. **Create ROS2 workspace and package structure**:
-   ```bash
-   mkdir -p ~/franka_ws/src/franka_joystick_control
-   cd ~/franka_ws/src/franka_joystick_control
-   
-   # Create the Python package structure:
-   mkdir -p franka_joystick_control
-   mkdir -p launch
-   mkdir -p resource
-   
-   # Copy files to correct locations:
-   # - setup.py to franka_joystick_control/ (root)
-   # - package.xml to franka_joystick_control/ (root)  
-   # - resource/franka_joystick_control to resource/ (empty marker file)
-   # - franka_joystick_control/__init__.py to franka_joystick_control/ (package init)
-   # - franka_joystick_publisher.py to franka_joystick_control/ (as module)
-   # - joystick_control.launch.py to launch/
-   ```
-
-3. **Package directory structure should look like**:
-   ```
-   ~/franka_ws/src/franka_joystick_control/
-   ├── setup.py
-   ├── package.xml
-   ├── resource/
-   │   └── franka_joystick_control
-   ├── franka_joystick_control/
-   │   ├── __init__.py
-   │   └── franka_joystick_publisher.py
-   └── launch/
-       └── joystick_control.launch.py
-   ```
-
-4. **Build the package**:
+1. **Build the package**:
    ```bash
    cd ~/franka_ws
    colcon build --packages-select franka_joystick_control
    source install/setup.bash
-   ```
-
-### 3. Network Configuration
-
-Your setup uses ethernet connection to **192.168.18.1**. 
-
-1. **Test connectivity**:
-   ```bash
-   ping 192.168.18.1
-   ```
-
-2. **Check your local IP** (should be in same subnet):
-   ```bash
-   ip addr show
-   # Should show something like 192.168.18.x
    ```
 
 ## Usage
@@ -106,13 +41,13 @@ Your setup uses ethernet connection to **192.168.18.1**.
 # SSH into your realtime PC
 ssh user@192.168.18.1
 
-# Run the controller (replace with your robot's IP - typically something like 172.16.0.2)
+# Run the controller (replace with your robot's IP - assumed 192.168.18.10)
 ./franka_joystick_control <robot_ip>
 ```
 
 Example:
 ```bash
-./franka_joystick_control 172.16.0.2
+./franka_joystick_control 192.168.18.10
 ```
 
 The controller will start listening on UDP port 8888 and display:
@@ -135,27 +70,6 @@ source ~/franka_ws/install/setup.bash
 ros2 launch franka_joystick_control joystick_control.launch.py
 ```
 
-**Manual startup for debugging**:
-```bash
-# Terminal 1: Joy node
-ros2 run joy joy_node
-
-# Terminal 2: Python joystick publisher  
-ros2 run franka_joystick_control franka_joystick_publisher
-```
-
-You should see output like:
-```
-[INFO] [franka_joystick_publisher]: Connecting to robot PC at 192.168.18.1:8888
-[INFO] [franka_joystick_publisher]: Franka Joystick Publisher started
-[INFO] [franka_joystick_publisher]: Controls:
-[INFO] [franka_joystick_publisher]:   Left stick: X/Y movement
-[INFO] [franka_joystick_publisher]:   Right stick: Z movement / Z rotation
-[INFO] [franka_joystick_publisher]:   Triggers: X/Y rotation
-[INFO] [franka_joystick_publisher]:   A button: Reset pose
-[INFO] [franka_joystick_publisher]:   B button: Emergency stop
-```
-
 ## Joystick Controls
 
 ### Xbox Controller Layout:
@@ -173,49 +87,6 @@ You should see output like:
 - **Movement limits**: ±50cm from initial position
 - **Emergency stop**: Immediately stops robot motion
 - **Collision detection**: Uses Franka's built-in collision detection
-
-## Troubleshooting
-
-### Common Issues:
-
-1. **"Failed to bind socket"**:
-   - Port 8888 already in use
-   - Try a different port or kill existing processes
-
-2. **"Failed to send command"**:
-   - Check network connectivity
-   - Verify IP address and port
-   - Check firewall settings
-
-3. **Robot doesn't move**:
-   - Verify joystick is connected: `ros2 topic echo /joy`
-   - Check if robot is in the right mode
-   - Ensure external activation device is connected
-   - Verify robot is not in protective stop
-
-4. **Jerky movement**:
-   - Adjust deadzone parameter
-   - Check network latency
-   - Ensure realtime PC has proper RT kernel
-
-### Debugging Commands:
-
-```bash
-# Check if joystick is connected and publishing
-ros2 topic echo /joy
-
-# Test network connectivity to realtime PC
-ping 192.168.18.1
-
-# Check if UDP port is reachable (install netcat if needed)
-nc -u 192.168.18.1 8888
-
-# List ROS2 nodes to verify everything is running
-ros2 node list
-
-# Check ROS2 topics
-ros2 topic list
-```
 
 ## Quick Start Summary
 
@@ -253,15 +124,6 @@ self.ANGULAR_SCALE = 1.0  # Reduce for slower rotation
 - Modify the UDP command format
 - Add new button/axis mappings
 - Extend the Franka controller to handle new commands
-
-## Safety Notes
-
-⚠️ **Important Safety Considerations**:
-- Always have the external activation device ready
-- Test in a safe environment first
-- Be aware of the robot's workspace limits
-- Emergency stop button (B) should always be easily accessible
-- Start with slow movements and increase speed gradually
 
 ## Network Protocol
 
