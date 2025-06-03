@@ -5,6 +5,7 @@
 #include <mutex>
 #include <array>
 #include <chrono>
+#include <fcntl.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>

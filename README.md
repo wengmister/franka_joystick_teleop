@@ -1,70 +1,82 @@
-# Franka Robot Joystick Control Setup
+# Franka Robot Joystick Control Setup (Python-Only)
 
-This system allows you to control a Franka robot using a joystick through ROS2 on your local machine, communicating with libfranka running on a realtime PC.
+This system allows you to control a Franka robot using a joystick through ROS2 on your local machine, communicating with libfranka running on a realtime PC at **192.168.18.1**.
 
 ## Architecture
 
 ```
-Local Machine (ROS2)           Network (UDP)         Realtime PC (libfranka)
+Local Machine (ROS2)           Ethernet (UDP)        Realtime PC (192.168.18.1)
 ┌─────────────────┐                                  ┌──────────────────────┐
 │   Joystick      │            ┌─────────┐           │  franka_joystick_    │
 │      ↓          │            │ Command │           │  control             │
 │ ROS2 joy_node   │ ────────── │ UDP     │ ────────→ │         ↓            │
 │      ↓          │            │ Socket  │           │  Franka Robot        │
-│ Joystick        │            └─────────┘           │  (libfranka)         │
+│ Python          │            └─────────┘           │  (libfranka)         │
 │ Publisher       │                                  └──────────────────────┘
 └─────────────────┘
 ```
 
 ## Setup Instructions
 
-### 1. Realtime PC Setup
+### 1. Realtime PC Setup (192.168.18.1)
 
-1. **Install libfranka** on your realtime PC (usually Ubuntu with RT kernel):
+1. **SSH into your realtime PC**:
+   ```bash
+   ssh user@192.168.18.1
+   ```
+
+2. **Install libfranka** (if not already installed):
    ```bash
    sudo apt install libfranka-dev
    ```
 
-2. **Compile the Franka controller**:
+3. **Create and compile the Franka controller**:
    ```bash
+   # Copy the franka_joystick_control.cpp file to the realtime PC
    g++ -std=c++17 franka_joystick_control.cpp -lfranka -lpthread -o franka_joystick_control
    ```
 
-3. **Set network permissions** (if needed):
-   ```bash
-   sudo setcap cap_net_bind_service+ep ./franka_joystick_control
-   ```
-
-### 2. Local Machine Setup (ROS2)
+### 2. Local Machine Setup (Python Package)
 
 1. **Install ROS2** (Humble recommended) and joy package:
    ```bash
-   sudo apt install ros-humble-joy
+   sudo apt install ros-humble-desktop ros-humble-joy
    ```
 
-2. **Create ROS2 workspace**:
+2. **Create ROS2 workspace and package structure**:
    ```bash
-   mkdir -p ~/franka_ws/src
-   cd ~/franka_ws/src
-   ```
-
-3. **Create the package structure**:
-   ```bash
-   mkdir -p franka_joystick_control/{src,scripts,launch}
+   mkdir -p ~/franka_ws/src/franka_joystick_control
+   cd ~/franka_ws/src/franka_joystick_control
    
-   # Copy the files:
-   # - CMakeLists.txt and package.xml to franka_joystick_control/
-   # - franka_joystick_publisher.cpp to franka_joystick_control/src/
-   # - franka_joystick_publisher.py to franka_joystick_control/scripts/
-   # - joystick_control.launch.py to franka_joystick_control/launch/
+   # Create the Python package structure:
+   mkdir -p franka_joystick_control
+   mkdir -p launch
+   mkdir -p resource
+   
+   # Copy files to correct locations:
+   # - setup.py to franka_joystick_control/ (root)
+   # - package.xml to franka_joystick_control/ (root)  
+   # - resource/franka_joystick_control to resource/ (empty marker file)
+   # - franka_joystick_control/__init__.py to franka_joystick_control/ (package init)
+   # - franka_joystick_publisher.py to franka_joystick_control/ (as module)
+   # - joystick_control.launch.py to launch/
    ```
 
-4. **Make Python script executable**:
-   ```bash
-   chmod +x ~/franka_ws/src/franka_joystick_control/scripts/franka_joystick_publisher.py
+3. **Package directory structure should look like**:
+   ```
+   ~/franka_ws/src/franka_joystick_control/
+   ├── setup.py
+   ├── package.xml
+   ├── resource/
+   │   └── franka_joystick_control
+   ├── franka_joystick_control/
+   │   ├── __init__.py
+   │   └── franka_joystick_publisher.py
+   └── launch/
+       └── joystick_control.launch.py
    ```
 
-5. **Build the package**:
+4. **Build the package**:
    ```bash
    cd ~/franka_ws
    colcon build --packages-select franka_joystick_control
@@ -73,18 +85,17 @@ Local Machine (ROS2)           Network (UDP)         Realtime PC (libfranka)
 
 ### 3. Network Configuration
 
-1. **Find IP addresses**:
-   - Realtime PC: `ip addr show`
-   - Local machine: `ip addr show`
+Your setup uses ethernet connection to **192.168.18.1**. 
 
-2. **Test connectivity**:
+1. **Test connectivity**:
    ```bash
-   ping <realtime_pc_ip>
+   ping 192.168.18.1
    ```
 
-3. **Configure firewall** (on realtime PC if needed):
+2. **Check your local IP** (should be in same subnet):
    ```bash
-   sudo ufw allow 8888/udp
+   ip addr show
+   # Should show something like 192.168.18.x
    ```
 
 ## Usage
@@ -93,9 +104,9 @@ Local Machine (ROS2)           Network (UDP)         Realtime PC (libfranka)
 
 ```bash
 # SSH into your realtime PC
-ssh user@<realtime_pc_ip>
+ssh user@192.168.18.1
 
-# Run the controller (replace with your robot's IP)
+# Run the controller (replace with your robot's IP - typically something like 172.16.0.2)
 ./franka_joystick_control <robot_ip>
 ```
 
@@ -104,30 +115,45 @@ Example:
 ./franka_joystick_control 172.16.0.2
 ```
 
+The controller will start listening on UDP port 8888 and display:
+```
+UDP server listening on port 8888
+Connected to robot at 172.16.0.2
+WARNING: Robot will move based on joystick input!
+Press Enter to start control loop...
+```
+
 ### 2. Start ROS2 Joystick Control (Local Machine)
 
-**Option A: Using Python version (recommended)**
+**Simple launch (uses default IP 192.168.18.1)**:
 ```bash
 # Source ROS2
 source /opt/ros/humble/setup.bash
 source ~/franka_ws/install/setup.bash
 
-# Launch with your realtime PC IP
-ros2 launch franka_joystick_control joystick_control.launch.py robot_pc_ip:=<realtime_pc_ip>
+# Launch with default settings
+ros2 launch franka_joystick_control joystick_control.launch.py
 ```
 
-**Option B: Using C++ version**
-```bash
-ros2 launch franka_joystick_control joystick_control.launch.py robot_pc_ip:=<realtime_pc_ip> use_python:=false
-```
-
-**Option C: Manual startup**
+**Manual startup for debugging**:
 ```bash
 # Terminal 1: Joy node
 ros2 run joy joy_node
 
-# Terminal 2: Joystick publisher
-ros2 run franka_joystick_control franka_joystick_publisher.py --ros-args -p robot_pc_ip:=<realtime_pc_ip>
+# Terminal 2: Python joystick publisher  
+ros2 run franka_joystick_control franka_joystick_publisher
+```
+
+You should see output like:
+```
+[INFO] [franka_joystick_publisher]: Connecting to robot PC at 192.168.18.1:8888
+[INFO] [franka_joystick_publisher]: Franka Joystick Publisher started
+[INFO] [franka_joystick_publisher]: Controls:
+[INFO] [franka_joystick_publisher]:   Left stick: X/Y movement
+[INFO] [franka_joystick_publisher]:   Right stick: Z movement / Z rotation
+[INFO] [franka_joystick_publisher]:   Triggers: X/Y rotation
+[INFO] [franka_joystick_publisher]:   A button: Reset pose
+[INFO] [franka_joystick_publisher]:   B button: Emergency stop
 ```
 
 ## Joystick Controls
@@ -175,15 +201,38 @@ ros2 run franka_joystick_control franka_joystick_publisher.py --ros-args -p robo
 ### Debugging Commands:
 
 ```bash
-# Check joystick input
+# Check if joystick is connected and publishing
 ros2 topic echo /joy
 
-# Check network connectivity
-nc -u <realtime_pc_ip> 8888
+# Test network connectivity to realtime PC
+ping 192.168.18.1
 
-# Monitor robot state (if you have franka_ros2)
-ros2 topic echo /franka_robot_state_broadcaster/robot_state
+# Check if UDP port is reachable (install netcat if needed)
+nc -u 192.168.18.1 8888
+
+# List ROS2 nodes to verify everything is running
+ros2 node list
+
+# Check ROS2 topics
+ros2 topic list
 ```
+
+## Quick Start Summary
+
+1. **On Realtime PC (192.168.18.1)**:
+   ```bash
+   ssh user@192.168.18.1
+   ./franka_joystick_control <robot_ip>
+   ```
+
+2. **On Local Machine**:
+   ```bash
+   source /opt/ros/humble/setup.bash
+   source ~/franka_ws/install/setup.bash
+   ros2 launch franka_joystick_control joystick_control.launch.py
+   ```
+
+That's it! Your joystick should now control the Franka robot over the ethernet connection.
 
 ## Customization
 
@@ -204,6 +253,15 @@ self.ANGULAR_SCALE = 1.0  # Reduce for slower rotation
 - Modify the UDP command format
 - Add new button/axis mappings
 - Extend the Franka controller to handle new commands
+
+## Safety Notes
+
+⚠️ **Important Safety Considerations**:
+- Always have the external activation device ready
+- Test in a safe environment first
+- Be aware of the robot's workspace limits
+- Emergency stop button (B) should always be easily accessible
+- Start with slow movements and increase speed gradually
 
 ## Network Protocol
 
