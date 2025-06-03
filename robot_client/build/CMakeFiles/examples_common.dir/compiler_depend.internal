@@ -3,7 +3,7 @@
 
 CMakeFiles/examples_common.dir/src/examples_common.cpp.o
  /home/zkweng/franka_joystick_control/robot_client/src/examples_common.cpp
- /home/zkweng/franka_joystick_control/robot_client/src/examples_common.h
+ /home/zkweng/franka_joystick_control/robot_client/examples_common.h
  /home/zkweng/ws/franka/install/include/franka/control_types.h
  /home/zkweng/ws/franka/install/include/franka/duration.h
  /home/zkweng/ws/franka/install/include/franka/errors.h

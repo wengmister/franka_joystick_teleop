@@ -3,7 +3,7 @@
 
 CMakeFiles/franka_joystick_control_client.dir/src/franka_joystick_control_client.cpp.o
  /home/zkweng/franka_joystick_control/robot_client/src/franka_joystick_control_client.cpp
- /home/zkweng/franka_joystick_control/robot_client/src/examples_common.h
+ /home/zkweng/franka_joystick_control/robot_client/examples_common.h
  /home/zkweng/ws/franka/install/include/franka/active_control.h
  /home/zkweng/ws/franka/install/include/franka/active_control_base.h
  /home/zkweng/ws/franka/install/include/franka/active_motion_generator.h

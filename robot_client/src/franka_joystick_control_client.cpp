@@ -40,8 +40,12 @@ private:
     const int PORT = 8888;
     
     // Movement limits
-    const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max
-    const double MAX_ANGULAR_VEL = 0.1;  // 0.1 rad/s max
+    const double MAX_LINEAR_VEL = 0.02;  // Reduced to 2cm/s max
+    const double MAX_ANGULAR_VEL = 0.05; // Reduced to 0.05 rad/s max
+    const double SMOOTHING_FACTOR = 0.1; // Velocity smoothing factor
+    
+    // Smoothed velocities for continuity
+    std::array<double, 6> smoothed_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
     
 public:
     ModernFrankaController() {
@@ -156,39 +160,71 @@ public:
                     cmd = current_command_;
                 }
                 
-                // Convert joystick commands to velocities
-                double v_x = cmd.linear_x * MAX_LINEAR_VEL;
-                double v_y = cmd.linear_y * MAX_LINEAR_VEL;
-                double v_z = cmd.linear_z * MAX_LINEAR_VEL;
-                double omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
-                double omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
-                double omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
+                // Convert joystick commands to target velocities
+                double target_v_x = cmd.linear_x * MAX_LINEAR_VEL;
+                double target_v_y = cmd.linear_y * MAX_LINEAR_VEL;
+                double target_v_z = cmd.linear_z * MAX_LINEAR_VEL;
+                double target_omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
+                double target_omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
+                double target_omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
                 
-                franka::CartesianVelocities output = {{v_x, v_y, v_z, omega_x, omega_y, omega_z}};
+                // Apply exponential smoothing to prevent discontinuities
+                smoothed_velocities_[0] += SMOOTHING_FACTOR * (target_v_x - smoothed_velocities_[0]);
+                smoothed_velocities_[1] += SMOOTHING_FACTOR * (target_v_y - smoothed_velocities_[1]);
+                smoothed_velocities_[2] += SMOOTHING_FACTOR * (target_v_z - smoothed_velocities_[2]);
+                smoothed_velocities_[3] += SMOOTHING_FACTOR * (target_omega_x - smoothed_velocities_[3]);
+                smoothed_velocities_[4] += SMOOTHING_FACTOR * (target_omega_y - smoothed_velocities_[4]);
+                smoothed_velocities_[5] += SMOOTHING_FACTOR * (target_omega_z - smoothed_velocities_[5]);
+                
+                // Apply deadzone to smoothed values
+                for (int i = 0; i < 6; i++) {
+                    if (std::abs(smoothed_velocities_[i]) < 0.001) { // 1mm/s deadzone
+                        smoothed_velocities_[i] = 0.0;
+                    }
+                }
+                
+                franka::CartesianVelocities output = {{
+                    smoothed_velocities_[0], smoothed_velocities_[1], smoothed_velocities_[2],
+                    smoothed_velocities_[3], smoothed_velocities_[4], smoothed_velocities_[5]
+                }};
+                
                 return output;
             };
             
-            // Start external velocity control loop
-            bool motion_finished = false;
-            auto active_control = robot.startCartesianVelocityControl(
-                research_interface::robot::Move::ControllerMode::kJointImpedance);
-                
             std::cout << "Joystick control active! Use joystick to move robot." << std::endl;
             
-            while (!motion_finished && !emergency_stop_) {
+            // Control loop with automatic restart after errors
+            while (!emergency_stop_) {
                 try {
-                    auto read_once_return = active_control->readOnce();
-                    auto robot_state = read_once_return.first;
-                    auto duration = read_once_return.second;
-                    auto cartesian_velocities = callback_control(robot_state, duration);
-                    motion_finished = cartesian_velocities.motion_finished;
-                    active_control->writeOnce(cartesian_velocities);
+                    // Start external velocity control loop
+                    bool motion_finished = false;
+                    auto active_control = robot.startCartesianVelocityControl(
+                        research_interface::robot::Move::ControllerMode::kJointImpedance);
+                    
+                    while (!motion_finished && !emergency_stop_) {
+                        auto read_once_return = active_control->readOnce();
+                        auto robot_state = read_once_return.first;
+                        auto duration = read_once_return.second;
+                        auto cartesian_velocities = callback_control(robot_state, duration);
+                        motion_finished = cartesian_velocities.motion_finished;
+                        active_control->writeOnce(cartesian_velocities);
+                    }
+                    
+                    if (motion_finished) {
+                        std::cout << "Motion finished normally." << std::endl;
+                        break;
+                    }
                     
                 } catch (const franka::ControlException& e) {
                     std::cout << "Control exception: " << e.what() << std::endl;
                     std::cout << "Running error recovery..." << std::endl;
                     robot.automaticErrorRecovery();
-                    break;
+                    
+                    // Reset smoothed velocities after error recovery
+                    std::fill(smoothed_velocities_.begin(), smoothed_velocities_.end(), 0.0);
+                    
+                    std::cout << "Restarting control loop..." << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // Brief pause
                 }
             }
             
