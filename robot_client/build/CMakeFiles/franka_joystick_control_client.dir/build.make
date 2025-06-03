@@ -92,6 +92,7 @@ franka_joystick_control_client_EXTERNAL_OBJECTS =
 
 franka_joystick_control_client: CMakeFiles/franka_joystick_control_client.dir/src/franka_joystick_control_client.cpp.o
 franka_joystick_control_client: CMakeFiles/franka_joystick_control_client.dir/build.make
+franka_joystick_control_client: libexamples_common.a
 franka_joystick_control_client: /home/zkweng/ws/franka/install/lib/libfranka.so.0.13.3
 franka_joystick_control_client: CMakeFiles/franka_joystick_control_client.dir/link.txt
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/zkweng/franka_joystick_control/robot_client/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Linking CXX executable franka_joystick_control_client"

@@ -1,4 +1,5 @@
-// Simple franka_joystick_control_client.cpp - Minimal version for debugging
+// Modern franka_joystick_control_client.cpp - Using external control loop
+// Copyright (c) 2024 - Based on Franka examples
 #include <cmath>
 #include <iostream>
 #include <thread>
@@ -11,8 +12,11 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <franka/active_control.h>
+#include <franka/active_motion_generator.h>
 #include <franka/exception.h>
 #include <franka/robot.h>
+#include "examples_common.h"
 
 struct JoystickCommand {
     double linear_x = 0.0;
@@ -25,7 +29,7 @@ struct JoystickCommand {
     bool reset_pose = false;
 };
 
-class SimpleFrankaController {
+class ModernFrankaController {
 private:
     std::atomic<bool> running_{true};
     std::atomic<bool> emergency_stop_{false};
@@ -35,14 +39,16 @@ private:
     int server_socket_;
     const int PORT = 8888;
     
-    std::array<double, 16> initial_pose_;
+    // Movement limits
+    const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max
+    const double MAX_ANGULAR_VEL = 0.1;  // 0.1 rad/s max
     
 public:
-    SimpleFrankaController() {
+    ModernFrankaController() {
         setupNetworking();
     }
     
-    ~SimpleFrankaController() {
+    ~ModernFrankaController() {
         running_ = false;
         close(server_socket_);
     }
@@ -89,6 +95,12 @@ public:
                     
                     if (cmd.emergency_stop) {
                         emergency_stop_ = true;
+                        std::cout << "Emergency stop received!" << std::endl;
+                    }
+                    
+                    // Debug output for non-zero commands
+                    if (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || std::abs(cmd.linear_z) > 0.01) {
+                        std::cout << "Joystick: [" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
                     }
                 }
             }
@@ -97,96 +109,91 @@ public:
         }
     }
     
-    void setDefaultBehavior(franka::Robot& robot) {
-        robot.setCollisionBehavior(
-            {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, 
-            {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
-            {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, 
-            {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
-            {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, 
-            {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
-            {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, 
-            {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}});
-    }
-    
     void run(const std::string& robot_ip) {
         try {
-            std::cout << "Connecting to robot..." << std::endl;
+            std::cout << "Connecting to robot at " << robot_ip << std::endl;
             franka::Robot robot(robot_ip);
-            std::cout << "Robot connected successfully" << std::endl;
-            
             setDefaultBehavior(robot);
-            std::cout << "Default behavior set" << std::endl;
+            
+            // First move to initial joint configuration
+            std::array<double, 7> q_goal = {{0, -M_PI_4, 0, -3 * M_PI_4, 0, M_PI_2, M_PI_4}};
+            MotionGenerator motion_generator(0.5, q_goal);
+            std::cout << "WARNING: This example will move the robot!" << std::endl
+                      << "Please make sure to have the user stop button at hand!" << std::endl
+                      << "Press Enter to continue..." << std::endl;
+            std::cin.ignore();
+            robot.control(motion_generator);
+            std::cout << "Finished moving to initial joint configuration." << std::endl;
+            
+            // Set collision behavior - more permissive for joystick control
+            robot.setCollisionBehavior(
+                {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
+                {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
+                {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
+                {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}});
             
             std::cout << "Starting network thread..." << std::endl;
-            std::thread network_thread(&SimpleFrankaController::networkThread, this);
-            std::cout << "Network thread started" << std::endl;
+            std::thread network_thread(&ModernFrankaController::networkThread, this);
             
-            std::cout << "WARNING: Robot will move based on joystick input!" << std::endl;
-            std::cout << "Press Enter to start control loop..." << std::endl;
-            std::cin.ignore();
+            std::cout << "Starting joystick control. Move joystick to control robot." << std::endl;
+            std::cout << "Press joystick B button for emergency stop." << std::endl;
             
-            std::cout << "Starting control loop..." << std::endl;
-            
-            double time = 0.0;
-            
-            robot.control([&](const franka::RobotState& robot_state,
-                             franka::Duration period) -> franka::CartesianPose {
+            // Create velocity control callback
+            auto callback_control = [this](const franka::RobotState& robot_state,
+                                          franka::Duration period) -> franka::CartesianVelocities {
                 
-                try {
-                    time += period.toSec();
-                    
-                    if (time == 0.0) {
-                        initial_pose_ = robot_state.O_T_EE;
-                        std::cout << "Initial pose captured" << std::endl;
-                        return initial_pose_;
-                    }
-                    
-                    // Check for emergency stop
-                    if (emergency_stop_) {
-                        std::cout << "Emergency stop activated!" << std::endl;
-                        return franka::MotionFinished(robot_state.O_T_EE);
-                    }
-                    
-                    // Get current joystick command
-                    JoystickCommand cmd;
-                    {
-                        std::lock_guard<std::mutex> lock(command_mutex_);
-                        cmd = current_command_;
-                    }
-                    
-                    // For now, just stay at initial position until we get this working
-                    std::array<double, 16> target = initial_pose_;
-                    
-                    // Add tiny movement if joystick is moved
-                    double dt = period.toSec();
-                    double movement_scale = 0.01; // Very small movements
-                    
-                    if (std::abs(cmd.linear_x) > 0.01) {
-                        target[12] += cmd.linear_x * movement_scale * dt;
-                        std::cout << "Moving X: " << cmd.linear_x * movement_scale * dt << std::endl;
-                    }
-                    if (std::abs(cmd.linear_y) > 0.01) {
-                        target[13] += cmd.linear_y * movement_scale * dt;
-                        std::cout << "Moving Y: " << cmd.linear_y * movement_scale * dt << std::endl;
-                    }
-                    if (std::abs(cmd.linear_z) > 0.01) {
-                        target[14] += cmd.linear_z * movement_scale * dt;
-                        std::cout << "Moving Z: " << cmd.linear_z * movement_scale * dt << std::endl;
-                    }
-                    
-                    return target;
-                    
-                } catch (const std::exception& e) {
-                    std::cout << "Exception in control loop: " << e.what() << std::endl;
-                    return franka::MotionFinished(robot_state.O_T_EE);
-                } catch (...) {
-                    std::cout << "Unknown exception in control loop!" << std::endl;
-                    return franka::MotionFinished(robot_state.O_T_EE);
+                // Check for emergency stop
+                if (emergency_stop_) {
+                    std::cout << "Emergency stop activated!" << std::endl;
+                    franka::CartesianVelocities stop_velocities = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+                    return franka::MotionFinished(stop_velocities);
                 }
-            });
+                
+                // Get current joystick command
+                JoystickCommand cmd;
+                {
+                    std::lock_guard<std::mutex> lock(command_mutex_);
+                    cmd = current_command_;
+                }
+                
+                // Convert joystick commands to velocities
+                double v_x = cmd.linear_x * MAX_LINEAR_VEL;
+                double v_y = cmd.linear_y * MAX_LINEAR_VEL;
+                double v_z = cmd.linear_z * MAX_LINEAR_VEL;
+                double omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
+                double omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
+                double omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
+                
+                franka::CartesianVelocities output = {{v_x, v_y, v_z, omega_x, omega_y, omega_z}};
+                return output;
+            };
             
-            std::cout << "Control loop finished" << std::endl;
+            // Start external velocity control loop
+            bool motion_finished = false;
+            auto active_control = robot.startCartesianVelocityControl(
+                research_interface::robot::Move::ControllerMode::kJointImpedance);
+                
+            std::cout << "Joystick control active! Use joystick to move robot." << std::endl;
+            
+            while (!motion_finished && !emergency_stop_) {
+                try {
+                    auto read_once_return = active_control->readOnce();
+                    auto robot_state = read_once_return.first;
+                    auto duration = read_once_return.second;
+                    auto cartesian_velocities = callback_control(robot_state, duration);
+                    motion_finished = cartesian_velocities.motion_finished;
+                    active_control->writeOnce(cartesian_velocities);
+                    
+                } catch (const franka::ControlException& e) {
+                    std::cout << "Control exception: " << e.what() << std::endl;
+                    std::cout << "Running error recovery..." << std::endl;
+                    robot.automaticErrorRecovery();
+                    break;
+                }
+            }
+            
+            std::cout << "Joystick control finished." << std::endl;
+            running_ = false;
             network_thread.join();
             
         } catch (const franka::Exception& e) {
@@ -194,9 +201,6 @@ public:
             running_ = false;
         } catch (const std::exception& e) {
             std::cout << "Standard exception: " << e.what() << std::endl;
-            running_ = false;
-        } catch (...) {
-            std::cout << "Unknown exception caught in main!" << std::endl;
             running_ = false;
         }
     }
@@ -209,16 +213,10 @@ int main(int argc, char** argv) {
     }
     
     try {
-        std::cout << "Creating controller..." << std::endl;
-        SimpleFrankaController controller;
-        std::cout << "Controller created, starting..." << std::endl;
+        ModernFrankaController controller;
         controller.run(argv[1]);
-        std::cout << "Controller finished" << std::endl;
     } catch (const std::exception& e) {
-        std::cerr << "Error in main: " << e.what() << std::endl;
-        return -1;
-    } catch (...) {
-        std::cerr << "Unknown error in main!" << std::endl;
+        std::cerr << "Error: " << e.what() << std::endl;
         return -1;
     }
     

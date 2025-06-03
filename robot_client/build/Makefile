@@ -117,6 +117,19 @@ depend:
 .PHONY : depend
 
 #=============================================================================
+# Target rules for targets named examples_common
+
+# Build rule for target.
+examples_common: cmake_check_build_system
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/Makefile2 examples_common
+.PHONY : examples_common
+
+# fast build rule for target.
+examples_common/fast:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/examples_common.dir/build.make CMakeFiles/examples_common.dir/build
+.PHONY : examples_common/fast
+
+#=============================================================================
 # Target rules for targets named franka_joystick_control_client
 
 # Build rule for target.
@@ -128,6 +141,30 @@ franka_joystick_control_client: cmake_check_build_system
 franka_joystick_control_client/fast:
 	$(MAKE) $(MAKESILENT) -f CMakeFiles/franka_joystick_control_client.dir/build.make CMakeFiles/franka_joystick_control_client.dir/build
 .PHONY : franka_joystick_control_client/fast
+
+src/examples_common.o: src/examples_common.cpp.o
+.PHONY : src/examples_common.o
+
+# target to build an object file
+src/examples_common.cpp.o:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/examples_common.dir/build.make CMakeFiles/examples_common.dir/src/examples_common.cpp.o
+.PHONY : src/examples_common.cpp.o
+
+src/examples_common.i: src/examples_common.cpp.i
+.PHONY : src/examples_common.i
+
+# target to preprocess a source file
+src/examples_common.cpp.i:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/examples_common.dir/build.make CMakeFiles/examples_common.dir/src/examples_common.cpp.i
+.PHONY : src/examples_common.cpp.i
+
+src/examples_common.s: src/examples_common.cpp.s
+.PHONY : src/examples_common.s
+
+# target to generate assembly for a file
+src/examples_common.cpp.s:
+	$(MAKE) $(MAKESILENT) -f CMakeFiles/examples_common.dir/build.make CMakeFiles/examples_common.dir/src/examples_common.cpp.s
+.PHONY : src/examples_common.cpp.s
 
 src/franka_joystick_control_client.o: src/franka_joystick_control_client.cpp.o
 .PHONY : src/franka_joystick_control_client.o
@@ -161,7 +198,11 @@ help:
 	@echo "... depend"
 	@echo "... edit_cache"
 	@echo "... rebuild_cache"
+	@echo "... examples_common"
 	@echo "... franka_joystick_control_client"
+	@echo "... src/examples_common.o"
+	@echo "... src/examples_common.i"
+	@echo "... src/examples_common.s"
 	@echo "... src/franka_joystick_control_client.o"
 	@echo "... src/franka_joystick_control_client.i"
 	@echo "... src/franka_joystick_control_client.s"
