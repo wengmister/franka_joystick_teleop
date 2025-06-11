@@ -18,6 +18,10 @@
 #include <franka/robot.h>
 #include "default_motion.h"
 #include <ruckig/ruckig.hpp>
+#include <ruckig/input_parameter.hpp>
+#include <ruckig/output_parameter.hpp>
+#include <kinematics.hpp>
+#include <Eigen/Dense>
 
 
 struct JoystickCommand {
@@ -44,15 +48,52 @@ private:
     // Movement limits
     const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max as you set
     const double MAX_ANGULAR_VEL = 0.05;  // Keep angular at 0.05 rad/s max
-    const double SMOOTHING_FACTOR = 0.05; // Much more aggressive smoothing (was 0.1)
     
-    // Smoothed velocities for continuity
-    std::array<double, 6> smoothed_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-    std::array<double, 6> prev_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    // Ruckig members - these need to persist across control loop calls
+    const int DOFS = 7;
+    ruckig::Ruckig<7> ruckig_generator_{0.001}; // 1 ms update rate
+    ruckig::InputParameter<7> ruckig_input_;
+    ruckig::OutputParameter<7> ruckig_output_;
+    
+    // Control timing
+    double control_time_{0.0};
+    bool ruckig_initialized_{false};
+    
+    // Set kinematic limits for Ruckig (adjust these based on your robot's capabilities and safety)
+    void initRuckigLimits() {
+        for (size_t i = 0; i < DOFS; ++i) {
+            ruckig_input_.max_velocity[i] = 0.5;       // rad/s - Conservative
+            ruckig_input_.max_acceleration[i] = 1.0;   // rad/s^2 - Conservative 
+            ruckig_input_.max_jerk[i] = 10.0;          // rad/s^3 - Conservative
+        }
+        // Don't initialize positions here - will be done in first control cycle
+    }
+    
+    void initializeRuckig(const franka::RobotState& robot_state) {
+        // Initialize current state from robot DESIRED state (not actual)
+        std::cout << "Initializing Ruckig with robot desired state..." << std::endl;
+        
+        for (size_t i = 0; i < DOFS; ++i) {
+            ruckig_input_.current_position[i] = robot_state.q_d[i];  // Use DESIRED positions
+            ruckig_input_.current_velocity[i] = 0.0;  // Start with zero velocity
+            ruckig_input_.current_acceleration[i] = 0.0; // Start with zero acceleration
+            
+            // Initialize targets to current desired state for smooth startup
+            ruckig_input_.target_position[i] = robot_state.q_d[i];
+            ruckig_input_.target_velocity[i] = 0.0;
+            ruckig_input_.target_acceleration[i] = 0.0;
+            
+            std::cout << "Joint " << i << ": pos=" << robot_state.q_d[i] 
+                     << " target=" << ruckig_input_.target_position[i] << std::endl;
+        }
+        ruckig_initialized_ = true;
+        std::cout << "Ruckig initialized successfully" << std::endl;
+    }
     
 public:
     ModernFrankaController() {
         setupNetworking();
+        initRuckigLimits(); // Call this in the constructor
     }
     
     ~ModernFrankaController() {
@@ -147,87 +188,155 @@ public:
             std::cout << "Starting joystick control. Move joystick to control robot." << std::endl;
             std::cout << "Press joystick B button for emergency stop." << std::endl;
             
-            // Create velocity control callback
-            auto callback_control = [this](const franka::RobotState& robot_state,
-                                          franka::Duration period) -> franka::CartesianVelocities {
+            // Reset control timing for new session
+            control_time_ = 0.0;
+            ruckig_initialized_ = false;
+            
+            // --- REPLACING CARTESIAN VELOCITY CONTROL WITH JOINT POSITION CONTROL ---
+            // Now, your callback will return franka::JointPositions after IK and Ruckig.
+            auto callback_joint_position_control =
+                [this](const franka::RobotState& robot_state,
+                       franka::Duration period) -> franka::JointPositions {
+
+                // Update control time
+                control_time_ += period.toSec();
                 
+                // Initialize Ruckig on first call with actual robot state
+                if (control_time_ == 0.0 || !ruckig_initialized_) {
+                    initializeRuckig(robot_state);
+                }
+
                 // Check for emergency stop
                 if (emergency_stop_) {
                     std::cout << "Emergency stop activated!" << std::endl;
-                    franka::CartesianVelocities stop_velocities = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-                    return franka::MotionFinished(stop_velocities);
+                    // Return current position to hold robot when stopped
+                    franka::JointPositions stop_positions(robot_state.q_d);
+                    return franka::MotionFinished(stop_positions);
                 }
-                
-                // Get current joystick command
+
+                // 1. Get current joystick command (Cartesian velocities)
                 JoystickCommand cmd;
                 {
                     std::lock_guard<std::mutex> lock(command_mutex_);
                     cmd = current_command_;
                 }
+
+                // Convert joystick commands to target Cartesian velocities with deadband
+                Eigen::Matrix<double, 6, 1> desired_cartesian_velocities;
+                const double deadband = 0.02; // 2% deadband to prevent small noise
                 
-                // Convert joystick commands to target velocities with corrected mapping
-                // Left stick: up/down = forward/backward (Y axis), left/right = left/right (X axis)
-                double target_v_x = cmd.linear_y * MAX_LINEAR_VEL;  // Up/down -> forward/backward
-                double target_v_y = -cmd.linear_x * MAX_LINEAR_VEL; // Left/right -> left/right (negated)
-                double target_v_z = cmd.linear_z * MAX_LINEAR_VEL;  // Right stick vertical -> up/down
-                double target_omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
-                double target_omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
-                double target_omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
+                auto apply_deadband = [deadband](double value) {
+                    return (std::abs(value) < deadband) ? 0.0 : value;
+                };
                 
-                // Apply exponential smoothing to prevent discontinuities
-                // More aggressive smoothing for stability
-                smoothed_velocities_[0] += SMOOTHING_FACTOR * (target_v_x - smoothed_velocities_[0]);
-                smoothed_velocities_[1] += SMOOTHING_FACTOR * (target_v_y - smoothed_velocities_[1]);
-                smoothed_velocities_[2] += SMOOTHING_FACTOR * (target_v_z - smoothed_velocities_[2]);
-                smoothed_velocities_[3] += SMOOTHING_FACTOR * (target_omega_x - smoothed_velocities_[3]);
-                smoothed_velocities_[4] += SMOOTHING_FACTOR * (target_omega_y - smoothed_velocities_[4]);
-                smoothed_velocities_[5] += SMOOTHING_FACTOR * (target_omega_z - smoothed_velocities_[5]);
+                desired_cartesian_velocities <<
+                    apply_deadband(cmd.linear_y) * MAX_LINEAR_VEL,  // X (forward/backward)
+                    apply_deadband(-cmd.linear_x) * MAX_LINEAR_VEL, // Y (left/right)
+                    apply_deadband(cmd.linear_z) * MAX_LINEAR_VEL,  // Z (up/down)
+                    apply_deadband(cmd.angular_x) * MAX_ANGULAR_VEL,
+                    apply_deadband(cmd.angular_y) * MAX_ANGULAR_VEL,
+                    apply_deadband(cmd.angular_z) * MAX_ANGULAR_VEL;
+
+                // Check if all velocities are essentially zero
+                bool is_stationary = desired_cartesian_velocities.norm() < 1e-6;
+
+                // If stationary, just return current target (no updates)
+                if (is_stationary) {
+                    std::array<double, 7> current_targets;
+                    for (size_t i = 0; i < DOFS; ++i) {
+                        current_targets[i] = ruckig_input_.target_position[i];
+                    }
+                    return franka::JointPositions(current_targets);
+                }
+
+                // Only update targets when there's significant motion command
+                static int update_counter = 0;
+                update_counter++;
                 
-                // Apply deadzone to smoothed values
-                for (int i = 0; i < 6; i++) {
-                    if (std::abs(smoothed_velocities_[i]) < 0.002) { // 2mm/s deadzone
-                        smoothed_velocities_[i] = 0.0;
+                if (update_counter % 10 == 0) { // Only update every 10th cycle to reduce discontinuities
+                    std::cout << "Updating targets... cart_vel_norm=" << desired_cartesian_velocities.norm() << std::endl;
+                    
+                    // --- 2. IK LAYER (using frankx::Kinematics) ---
+                    Eigen::Matrix<double, 7, 1> q_current_eigen = Eigen::Map<const Eigen::Matrix<double, 7, 1>>(robot_state.q_d.data());
+                    
+                    // Calculate IK
+                    Eigen::Matrix<double, 6, 7> J = frankx::Kinematics::jacobian(q_current_eigen);
+                    Eigen::Matrix<double, 7, 6> J_inv = frankx::Kinematics::pseudoinverse(J);
+                    Eigen::Matrix<double, 7, 1> desired_joint_velocities_ik = J_inv * desired_cartesian_velocities;
+
+                    // Apply very conservative velocity limits
+                    for (int i = 0; i < 7; i++) {
+                        desired_joint_velocities_ik[i] = std::max(-0.1, std::min(0.1, desired_joint_velocities_ik[i]));
+                    }
+
+                    // Update targets with small increments (like frankx joint motion generator)
+                    for (size_t i = 0; i < DOFS; ++i) {
+                        // Very small position increment for continuous motion
+                        double small_increment = desired_joint_velocities_ik[i] * 0.01; // 10ms worth
+                        ruckig_input_.target_position[i] = ruckig_input_.current_position[i] + small_increment;
+                        ruckig_input_.target_velocity[i] = 0.0; // Always target zero velocity
+                        ruckig_input_.target_acceleration[i] = 0.0;
+                        
+                        if (i == 0 && std::abs(small_increment) > 1e-6) {
+                            std::cout << "Joint 0: increment=" << small_increment 
+                                     << " new_target=" << ruckig_input_.target_position[i] << std::endl;
+                        }
                     }
                 }
+
+                // --- 3. RUCKIG TRAJECTORY GENERATION LAYER ---
+                // Handle multiple steps per control cycle (like frankx)
+                const int steps = std::max<int>(period.toMSec(), 1);
+                ruckig::Result result;
+                std::array<double, 7> joint_positions;
                 
-                // Additional acceleration limiting - clamp velocity changes
-                const double MAX_VEL_CHANGE = 0.001; // Max change per cycle: 1mm/s
-                
-                for (int i = 0; i < 6; i++) {
-                    double vel_change = smoothed_velocities_[i] - prev_velocities_[i];
-                    if (vel_change > MAX_VEL_CHANGE) {
-                        smoothed_velocities_[i] = prev_velocities_[i] + MAX_VEL_CHANGE;
-                    } else if (vel_change < -MAX_VEL_CHANGE) {
-                        smoothed_velocities_[i] = prev_velocities_[i] - MAX_VEL_CHANGE;
+                for (int step = 0; step < steps; step++) {
+                    // Calculate the next trajectory point
+                    result = ruckig_generator_.update(ruckig_input_, ruckig_output_);
+                    joint_positions = ruckig_output_.new_position;
+                    
+                    if (result == ruckig::Result::Finished) {
+                        std::cout << "Ruckig finished - using target position" << std::endl;
+                        joint_positions = ruckig_input_.target_position;
+                        return franka::JointPositions(joint_positions);
+                        
+                    } else if (result == ruckig::Result::Error) {
+                        std::cerr << "Ruckig error - holding current position" << std::endl;
+                        // Print debug info
+                        std::cout << "Current pos[0]=" << ruckig_input_.current_position[0] 
+                                 << " vel[0]=" << ruckig_input_.current_velocity[0]
+                                 << " target_pos[0]=" << ruckig_input_.target_position[0] << std::endl;
+                        return franka::JointPositions(robot_state.q_d);
                     }
-                    prev_velocities_[i] = smoothed_velocities_[i];
+                    
+                    // CRITICAL: Pass output to input for continuity (frankx pattern)
+                    ruckig_output_.pass_to_input(ruckig_input_);
                 }
-                
-                franka::CartesianVelocities output = {{
-                    smoothed_velocities_[0], smoothed_velocities_[1], smoothed_velocities_[2],
-                    smoothed_velocities_[3], smoothed_velocities_[4], smoothed_velocities_[5]
-                }};
-                
-                return output;
-            };
-            
+
+                return franka::JointPositions(joint_positions);
+            }; // End of callback_joint_position_control lambda
+
             std::cout << "Joystick control active! Use joystick to move robot." << std::endl;
             
             // Control loop with automatic restart after errors
             while (!emergency_stop_) {
                 try {
-                    // Start external velocity control loop
-                    bool motion_finished = false;
-                    auto active_control = robot.startCartesianVelocityControl(
+                    // Start external Joint Position control loop
+                    auto active_control = robot.startJointPositionControl(
                         research_interface::robot::Move::ControllerMode::kJointImpedance);
                     
+                    bool motion_finished = false;
                     while (!motion_finished && !emergency_stop_) {
                         auto read_once_return = active_control->readOnce();
                         auto robot_state = read_once_return.first;
                         auto duration = read_once_return.second;
-                        auto cartesian_velocities = callback_control(robot_state, duration);
-                        motion_finished = cartesian_velocities.motion_finished;
-                        active_control->writeOnce(cartesian_velocities);
+                        
+                        // Call your joint position control callback
+                        auto joint_positions_command = callback_joint_position_control(robot_state, duration);
+                        motion_finished = joint_positions_command.motion_finished;
+                        
+                        // Write the JointPosition command
+                        active_control->writeOnce(joint_positions_command);
                     }
                     
                     if (motion_finished) {
@@ -240,9 +349,9 @@ public:
                     std::cout << "Running error recovery..." << std::endl;
                     robot.automaticErrorRecovery();
                     
-                    // Reset smoothed velocities but keep prev_velocities to avoid discontinuity
-                    std::fill(smoothed_velocities_.begin(), smoothed_velocities_.end(), 0.0);
-                    // DON'T reset prev_velocities_ - let them naturally decay to zero
+                    // Reset Ruckig state for clean restart
+                    control_time_ = 0.0;
+                    ruckig_initialized_ = false;
                     
                     std::cout << "Restarting control loop..." << std::endl;
                     std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Longer pause

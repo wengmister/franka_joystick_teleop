@@ -12,11 +12,17 @@ set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH};$ENV{HOME}/ws/franka/install")
 find_package(Franka REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
+find_package(ruckig REQUIRED)
 
-# Add default_motionas a library
+# Add default_motion as a library
 add_library(default_motion src/default_motion.cpp)
 target_link_libraries(default_motion Franka::Franka)
 target_include_directories(default_motion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${EIGEN3_INCLUDE_DIR})
+
+# Add kinematics as a library
+add_library(kinematics src/kinematics.cpp)
+target_link_libraries(kinematics ${EIGEN3_LIBRARIES})
+target_include_directories(kinematics PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${EIGEN3_INCLUDE_DIR})
 
 # Add executable
 add_executable(franka_joystick_control_client src/franka_joystick_control_client.cpp)
@@ -26,6 +32,8 @@ target_link_libraries(franka_joystick_control_client
     Franka::Franka
     Threads::Threads
     default_motion
+    kinematics
+    ruckig::ruckig
     ${EIGEN3_LIBRARIES}
 )
 
