@@ -46,8 +46,8 @@ private:
     const int PORT = 8888;
     
     // Movement limits
-    const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max as you set
-    const double MAX_ANGULAR_VEL = 0.05;  // Keep angular at 0.05 rad/s max
+    const double MAX_LINEAR_VEL = 0.15;  // 3x original (0.05 * 3)
+    const double MAX_ANGULAR_VEL = 0.15;  // 3x original (0.05 * 3)
     
     // Ruckig members - these need to persist across control loop calls
     const int DOFS = 7;
@@ -59,12 +59,23 @@ private:
     double control_time_{0.0};
     bool ruckig_initialized_{false};
     
+    // Connection monitoring
+    std::chrono::steady_clock::time_point last_command_time_;
+    std::atomic<bool> connection_active_{false};
+    const double CONNECTION_TIMEOUT_SEC = 0.5; // 500ms timeout
+    const double SLOWDOWN_TIME_SEC = 1.0; // 1 second to ramp down to zero
+    
+    // Graceful slowdown state
+    bool in_slowdown_mode_{false};
+    std::chrono::steady_clock::time_point slowdown_start_time_;
+    Eigen::Matrix<double, 6, 1> last_valid_velocities_;
+    
     // Set kinematic limits for Ruckig (adjust these based on your robot's capabilities and safety)
     void initRuckigLimits() {
         for (size_t i = 0; i < DOFS; ++i) {
-            ruckig_input_.max_velocity[i] = 0.5;       // rad/s - Conservative
-            ruckig_input_.max_acceleration[i] = 1.0;   // rad/s^2 - Conservative 
-            ruckig_input_.max_jerk[i] = 10.0;          // rad/s^3 - Conservative
+            ruckig_input_.max_velocity[i] = 1.5;       // 3x original (0.5 * 3)
+            ruckig_input_.max_acceleration[i] = 3.0;   // 3x original (1.0 * 3)
+            ruckig_input_.max_jerk[i] = 30.0;          // 3x original (10.0 * 3)
         }
         // Don't initialize positions here - will be done in first control cycle
     }
@@ -94,6 +105,12 @@ public:
     ModernFrankaController() {
         setupNetworking();
         initRuckigLimits(); // Call this in the constructor
+        
+        // Initialize connection tracking
+        last_command_time_ = std::chrono::steady_clock::now();
+        connection_active_ = false;
+        in_slowdown_mode_ = false;
+        last_valid_velocities_.setZero();
     }
     
     ~ModernFrankaController() {
@@ -141,13 +158,24 @@ public:
                     std::lock_guard<std::mutex> lock(command_mutex_);
                     current_command_ = cmd;
                     
+                    // Update connection tracking
+                    last_command_time_ = std::chrono::steady_clock::now();
+                    bool has_motion = (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || 
+                                     std::abs(cmd.linear_z) > 0.01 || std::abs(cmd.angular_x) > 0.01 || 
+                                     std::abs(cmd.angular_y) > 0.01 || std::abs(cmd.angular_z) > 0.01);
+                    
+                    if (has_motion) {
+                        connection_active_ = true;
+                        in_slowdown_mode_ = false; // Reset slowdown if we get new motion commands
+                    }
+                    
                     if (cmd.emergency_stop) {
                         emergency_stop_ = true;
                         std::cout << "Emergency stop received!" << std::endl;
                     }
                     
                     // Debug output for non-zero commands
-                    if (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || std::abs(cmd.linear_z) > 0.01) {
+                    if (has_motion) {
                         std::cout << "Joystick: Left[" << cmd.linear_x << "," << cmd.linear_y 
                                   << "] Right[" << cmd.linear_z << "] -> Robot[fwd=" << cmd.linear_y 
                                   << ", right=" << -cmd.linear_x << ", up=" << cmd.linear_z << "]" << std::endl;
@@ -221,6 +249,28 @@ public:
                     cmd = current_command_;
                 }
 
+                // Check connection status and implement graceful slowdown
+                auto now = std::chrono::steady_clock::now();
+                auto time_since_last_command = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_command_time_).count() / 1000.0;
+                
+                bool connection_lost = (time_since_last_command > CONNECTION_TIMEOUT_SEC);
+                
+                if (connection_lost && connection_active_) {
+                    // Connection just lost - start graceful slowdown
+                    std::cout << "Joystick connection lost (" << time_since_last_command << "s) - starting graceful slowdown" << std::endl;
+                    connection_active_ = false;
+                    in_slowdown_mode_ = true;
+                    slowdown_start_time_ = now;
+                    // Store last valid velocities for gradual reduction
+                    last_valid_velocities_ <<
+                        cmd.linear_y * MAX_LINEAR_VEL,
+                        -cmd.linear_x * MAX_LINEAR_VEL,
+                        cmd.linear_z * MAX_LINEAR_VEL,
+                        cmd.angular_x * MAX_ANGULAR_VEL,
+                        cmd.angular_y * MAX_ANGULAR_VEL,
+                        cmd.angular_z * MAX_ANGULAR_VEL;
+                }
+
                 // Convert joystick commands to target Cartesian velocities with deadband
                 Eigen::Matrix<double, 6, 1> desired_cartesian_velocities;
                 const double deadband = 0.02; // 2% deadband to prevent small noise
@@ -229,13 +279,30 @@ public:
                     return (std::abs(value) < deadband) ? 0.0 : value;
                 };
                 
-                desired_cartesian_velocities <<
-                    apply_deadband(cmd.linear_y) * MAX_LINEAR_VEL,  // X (forward/backward)
-                    apply_deadband(-cmd.linear_x) * MAX_LINEAR_VEL, // Y (left/right)
-                    apply_deadband(cmd.linear_z) * MAX_LINEAR_VEL,  // Z (up/down)
-                    apply_deadband(cmd.angular_x) * MAX_ANGULAR_VEL,
-                    apply_deadband(cmd.angular_y) * MAX_ANGULAR_VEL,
-                    apply_deadband(cmd.angular_z) * MAX_ANGULAR_VEL;
+                if (in_slowdown_mode_) {
+                    // Gradually reduce velocities to zero during slowdown
+                    auto time_in_slowdown = std::chrono::duration_cast<std::chrono::milliseconds>(now - slowdown_start_time_).count() / 1000.0;
+                    double slowdown_factor = std::max(0.0, 1.0 - (time_in_slowdown / SLOWDOWN_TIME_SEC));
+                    
+                    desired_cartesian_velocities = last_valid_velocities_ * slowdown_factor;
+                    
+                    if (slowdown_factor <= 0.0) {
+                        std::cout << "Slowdown complete - robot stopped gracefully" << std::endl;
+                        in_slowdown_mode_ = false;
+                        desired_cartesian_velocities.setZero();
+                    } else {
+                        std::cout << "Slowdown progress: " << (int)((1.0 - slowdown_factor) * 100) << "%" << std::endl;
+                    }
+                } else {
+                    // Normal operation - use joystick commands
+                    desired_cartesian_velocities <<
+                        apply_deadband(cmd.linear_y) * MAX_LINEAR_VEL,  // X (forward/backward)
+                        apply_deadband(-cmd.linear_x) * MAX_LINEAR_VEL, // Y (left/right)
+                        apply_deadband(cmd.linear_z) * MAX_LINEAR_VEL,  // Z (up/down)
+                        apply_deadband(cmd.angular_x) * MAX_ANGULAR_VEL,
+                        apply_deadband(cmd.angular_y) * MAX_ANGULAR_VEL,
+                        apply_deadband(cmd.angular_z) * MAX_ANGULAR_VEL;
+                }
 
                 // Check if all velocities are essentially zero
                 bool is_stationary = desired_cartesian_velocities.norm() < 1e-6;
@@ -253,7 +320,7 @@ public:
                 static int update_counter = 0;
                 update_counter++;
                 
-                if (update_counter % 10 == 0) { // Only update every 10th cycle to reduce discontinuities
+                if (update_counter % 3 == 0) { // Update every 3rd cycle for 3x speed (was every 10th)
                     std::cout << "Updating targets... cart_vel_norm=" << desired_cartesian_velocities.norm() << std::endl;
                     
                     // --- 2. IK LAYER (using frankx::Kinematics) ---
@@ -264,21 +331,21 @@ public:
                     Eigen::Matrix<double, 7, 6> J_inv = frankx::Kinematics::pseudoinverse(J);
                     Eigen::Matrix<double, 7, 1> desired_joint_velocities_ik = J_inv * desired_cartesian_velocities;
 
-                    // Apply very conservative velocity limits
+                    // Apply 3x velocity limits
                     for (int i = 0; i < 7; i++) {
-                        desired_joint_velocities_ik[i] = std::max(-0.1, std::min(0.1, desired_joint_velocities_ik[i]));
+                        desired_joint_velocities_ik[i] = std::max(-0.3, std::min(0.3, desired_joint_velocities_ik[i]));
                     }
 
-                    // Update targets with small increments (like frankx joint motion generator)
+                    // Update targets with 3x increments
                     for (size_t i = 0; i < DOFS; ++i) {
-                        // Very small position increment for continuous motion
-                        double small_increment = desired_joint_velocities_ik[i] * 0.01; // 10ms worth
-                        ruckig_input_.target_position[i] = ruckig_input_.current_position[i] + small_increment;
+                        // 3x position increment (30ms worth instead of 10ms)
+                        double increment = desired_joint_velocities_ik[i] * 0.03; // 30ms worth
+                        ruckig_input_.target_position[i] = ruckig_input_.current_position[i] + increment;
                         ruckig_input_.target_velocity[i] = 0.0; // Always target zero velocity
                         ruckig_input_.target_acceleration[i] = 0.0;
                         
-                        if (i == 0 && std::abs(small_increment) > 1e-6) {
-                            std::cout << "Joint 0: increment=" << small_increment 
+                        if (i == 0 && std::abs(increment) > 1e-6) {
+                            std::cout << "Joint 0: increment=" << increment 
                                      << " new_target=" << ruckig_input_.target_position[i] << std::endl;
                         }
                     }
