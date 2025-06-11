@@ -10,7 +10,7 @@
 #include <franka/robot_state.h>
 
 /**
- * @file examples_common.h
+ * @file default_motion.h
  * Contains common types and functions for the examples.
  */
 

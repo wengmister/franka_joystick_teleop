@@ -13,10 +13,10 @@ find_package(Franka REQUIRED)
 find_package(Threads REQUIRED)
 find_package(Eigen3 REQUIRED)
 
-# Add examples_common as a library
-add_library(examples_common src/examples_common.cpp)
-target_link_libraries(examples_common Franka::Franka)
-target_include_directories(examples_common PUBLIC ${CMAKE_CURRENT_SOURCE_DIR} ${EIGEN3_INCLUDE_DIR})
+# Add default_motionas a library
+add_library(default_motion src/default_motion.cpp)
+target_link_libraries(default_motion Franka::Franka)
+target_include_directories(default_motion PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include ${EIGEN3_INCLUDE_DIR})
 
 # Add executable
 add_executable(franka_joystick_control_client src/franka_joystick_control_client.cpp)
@@ -25,13 +25,13 @@ add_executable(franka_joystick_control_client src/franka_joystick_control_client
 target_link_libraries(franka_joystick_control_client
     Franka::Franka
     Threads::Threads
-    examples_common
+    default_motion
     ${EIGEN3_LIBRARIES}
 )
 
 # Include directories
 target_include_directories(franka_joystick_control_client PRIVATE 
-    ${CMAKE_CURRENT_SOURCE_DIR} 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${EIGEN3_INCLUDE_DIR}
 )
 

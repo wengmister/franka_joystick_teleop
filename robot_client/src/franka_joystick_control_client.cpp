@@ -1,5 +1,5 @@
-// Modern franka_joystick_control_client.cpp - Using external control loop
-// Copyright (c) 2024 - Based on Franka examples
+// franka_joystick_control_client.cpp
+// Copyright (c) 2025 - Based on Franka examples
 #include <cmath>
 #include <iostream>
 #include <thread>
@@ -16,7 +16,9 @@
 #include <franka/active_motion_generator.h>
 #include <franka/exception.h>
 #include <franka/robot.h>
-#include "examples_common.h"
+#include "default_motion.h"
+#include <ruckig/ruckig.hpp>
+
 
 struct JoystickCommand {
     double linear_x = 0.0;
