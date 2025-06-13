@@ -16,10 +16,12 @@ find_package(Eigen3 REQUIRED)
 # Force static libraries globally
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
 
-# Disable tests for all subdirectories
+# Disable tests and Python bindings for all subdirectories
 set(BUILD_TESTS OFF CACHE BOOL "Disable all tests" FORCE)
 set(BUILD_TESTING OFF CACHE BOOL "Disable all testing" FORCE)
 set(ENABLE_TESTS OFF CACHE BOOL "Disable all tests" FORCE)
+set(BUILD_PYTHON_MODULE OFF CACHE BOOL "Disable Python bindings" FORCE)
+set(WITH_PYTHON OFF CACHE BOOL "Disable Python support" FORCE)
 
 # Add frankx as a subdirectory (this is the cleanest approach)
 add_subdirectory(frankx)
