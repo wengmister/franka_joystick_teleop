@@ -1,0 +1,3 @@
+[submodule "robot_client/frankx"]
+	path = robot_client/frankx
+	url = git@github.com:pantor/frankx.git
