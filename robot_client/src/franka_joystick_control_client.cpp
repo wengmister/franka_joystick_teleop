@@ -12,10 +12,10 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <franka/active_control.h>
-#include <franka/active_motion_generator.h>
 #include <franka/exception.h>
 #include <franka/robot.h>
+#include <franka/model.h>
+#include <Eigen/Dense>
 #include "examples_common.h"
 
 struct JoystickCommand {
@@ -39,14 +39,9 @@ private:
     int server_socket_;
     const int PORT = 8888;
     
-    // Movement limits
-    const double MAX_LINEAR_VEL = 0.05;  // 5cm/s max as you set
-    const double MAX_ANGULAR_VEL = 0.05;  // Keep angular at 0.05 rad/s max
-    const double SMOOTHING_FACTOR = 0.05; // Much more aggressive smoothing (was 0.1)
-    
-    // Smoothed velocities for continuity
-    std::array<double, 6> smoothed_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-    std::array<double, 6> prev_velocities_ = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+    // Movement limits for impedance control
+    const double MAX_LINEAR_VEL = 0.15;  // 15cm/s max 
+    const double MAX_ANGULAR_VEL = 0.05;  // 0.05 rad/s max
     
 public:
     ModernFrankaController() {
@@ -134,10 +129,28 @@ public:
             
             // Set collision behavior - more permissive for joystick control
             robot.setCollisionBehavior(
-                {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
-                {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}}, {{20.0, 20.0, 18.0, 18.0, 16.0, 14.0, 12.0}},
-                {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}},
-                {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}}, {{20.0, 20.0, 20.0, 25.0, 25.0, 25.0}});
+                {{40.0, 40.0, 30.0, 30.0, 30.0, 30.0, 25.0}}, {{40.0, 40.0, 30.0, 30.0, 30.0, 30.0, 25.0}},
+                {{40.0, 40.0, 30.0, 30.0, 30.0, 30.0, 25.0}}, {{40.0, 40.0, 30.0, 30.0, 30.0, 30.0, 25.0}},
+                {{40.0, 40.0, 40.0, 30.0, 30.0, 25.0}}, {{30.0, 30.0, 30.0, 25.0, 25.0, 25.0}},
+                {{40.0, 40.0, 40.0, 30.0, 30.0, 25.0}}, {{30.0, 30.0, 30.0, 25.0, 25.0, 25.0}});
+            
+            // Configure custom end-effector (0.7kg mass)
+            // TODO: Update COM and inertia matrix when available
+            std::array<double, 16> EE_T_K = {{1.0, 0.0, 0.0, 0.0,  // Identity transformation for now
+                                              0.0, 1.0, 0.0, 0.0,
+                                              0.0, 0.0, 1.0, 0.0,
+                                              0.0, 0.0, 0.0, 1.0}};
+            robot.setEE(EE_T_K);
+            
+            // Set end-effector mass and inertia
+            double ee_mass = 0.7;  // 0.7kg custom end-effector
+            std::array<double, 3> ee_com = {{0.0, 0.0, 0.05}};  // COM offset from flange (update when known)
+            std::array<double, 9> ee_inertia = {{0.01, 0.0, 0.0,   // Inertia matrix (update when calculated)
+                                                 0.0, 0.01, 0.0,
+                                                 0.0, 0.0, 0.01}};
+            robot.setLoad(ee_mass, ee_com, ee_inertia);
+            
+            std::cout << "Configured custom end-effector: mass=" << ee_mass << "kg" << std::endl;
             
             std::cout << "Starting network thread..." << std::endl;
             std::thread network_thread(&ModernFrankaController::networkThread, this);
@@ -145,15 +158,39 @@ public:
             std::cout << "Starting joystick control. Move joystick to control robot." << std::endl;
             std::cout << "Press joystick B button for emergency stop." << std::endl;
             
-            // Create velocity control callback
-            auto callback_control = [this](const franka::RobotState& robot_state,
-                                          franka::Duration period) -> franka::CartesianVelocities {
+            // Impedance control parameters
+            Eigen::Matrix<double, 6, 6> stiffness = Eigen::MatrixXd::Zero(6, 6);
+            Eigen::Matrix<double, 6, 6> damping = Eigen::MatrixXd::Zero(6, 6);
+            
+            // Increased stiffness for more responsive control
+            stiffness.topLeftCorner(3, 3) << 1500.0 * Eigen::MatrixXd::Identity(3, 3);  // Translational: 1200 N/m
+            stiffness.bottomRightCorner(3, 3) << 100.0 * Eigen::MatrixXd::Identity(3, 3); // Rotational: 100 Nm/rad
+            
+            // Reduced damping for more natural motion
+            damping.topLeftCorner(3, 3) << 1.5 * sqrt(1500.0) * Eigen::MatrixXd::Identity(3, 3);
+            damping.bottomRightCorner(3, 3) << 1.5 * sqrt(100.0) * Eigen::MatrixXd::Identity(3, 3);
+            
+            // Initial target pose
+            franka::Model model = robot.loadModel();
+            franka::RobotState initial_state = robot.readOnce();
+            Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
+            Eigen::Vector3d target_position = initial_transform.translation();
+            Eigen::Quaterniond target_orientation(initial_transform.linear());
+            
+            // Smoothing variables for target updates
+            Eigen::Vector3d smoothed_velocity = Eigen::Vector3d::Zero();
+            Eigen::Vector3d smoothed_angular_velocity = Eigen::Vector3d::Zero();
+            const double VELOCITY_SMOOTHING = 0.1;  // Smoothing factor for target velocity
+
+            // Create impedance control callback
+            auto callback_control = [this, &model, &stiffness, &damping, &target_position, &target_orientation, 
+                                   &smoothed_velocity, &smoothed_angular_velocity, VELOCITY_SMOOTHING]
+                                  (const franka::RobotState& robot_state, franka::Duration period) -> franka::Torques {
                 
                 // Check for emergency stop
                 if (emergency_stop_) {
                     std::cout << "Emergency stop activated!" << std::endl;
-                    franka::CartesianVelocities stop_velocities = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
-                    return franka::MotionFinished(stop_velocities);
+                    return franka::MotionFinished(franka::Torques({0, 0, 0, 0, 0, 0, 0}));
                 }
                 
                 // Get current joystick command
@@ -163,50 +200,82 @@ public:
                     cmd = current_command_;
                 }
                 
-                // Convert joystick commands to target velocities with corrected mapping
-                // Left stick: up/down = forward/backward (Y axis), left/right = left/right (X axis)
-                double target_v_x = cmd.linear_y * MAX_LINEAR_VEL;  // Up/down -> forward/backward
-                double target_v_y = -cmd.linear_x * MAX_LINEAR_VEL; // Left/right -> left/right (negated)
-                double target_v_z = cmd.linear_z * MAX_LINEAR_VEL;  // Right stick vertical -> up/down
-                double target_omega_x = cmd.angular_x * MAX_ANGULAR_VEL;
-                double target_omega_y = cmd.angular_y * MAX_ANGULAR_VEL;
-                double target_omega_z = cmd.angular_z * MAX_ANGULAR_VEL;
+                // Smooth joystick input to target velocities
+                double dt = period.toSec();
+                Eigen::Vector3d target_vel;
+                target_vel[0] = cmd.linear_y * MAX_LINEAR_VEL;    // forward/backward
+                target_vel[1] = -cmd.linear_x * MAX_LINEAR_VEL;   // left/right  
+                target_vel[2] = cmd.linear_z * MAX_LINEAR_VEL;    // up/down
                 
-                // Apply exponential smoothing to prevent discontinuities
-                // More aggressive smoothing for stability
-                smoothed_velocities_[0] += SMOOTHING_FACTOR * (target_v_x - smoothed_velocities_[0]);
-                smoothed_velocities_[1] += SMOOTHING_FACTOR * (target_v_y - smoothed_velocities_[1]);
-                smoothed_velocities_[2] += SMOOTHING_FACTOR * (target_v_z - smoothed_velocities_[2]);
-                smoothed_velocities_[3] += SMOOTHING_FACTOR * (target_omega_x - smoothed_velocities_[3]);
-                smoothed_velocities_[4] += SMOOTHING_FACTOR * (target_omega_y - smoothed_velocities_[4]);
-                smoothed_velocities_[5] += SMOOTHING_FACTOR * (target_omega_z - smoothed_velocities_[5]);
+                Eigen::Vector3d target_angular_vel;
+                target_angular_vel[0] = cmd.angular_x * MAX_ANGULAR_VEL;
+                target_angular_vel[1] = cmd.angular_y * MAX_ANGULAR_VEL;
+                target_angular_vel[2] = cmd.angular_z * MAX_ANGULAR_VEL;
                 
-                // Apply deadzone to smoothed values
-                for (int i = 0; i < 6; i++) {
-                    if (std::abs(smoothed_velocities_[i]) < 0.002) { // 2mm/s deadzone
-                        smoothed_velocities_[i] = 0.0;
+                // Apply exponential smoothing to velocities
+                smoothed_velocity = (1.0 - VELOCITY_SMOOTHING) * smoothed_velocity + VELOCITY_SMOOTHING * target_vel;
+                smoothed_angular_velocity = (1.0 - VELOCITY_SMOOTHING) * smoothed_angular_velocity + VELOCITY_SMOOTHING * target_angular_vel;
+                
+                // Apply deadzone to smoothed velocities
+                for (int i = 0; i < 3; i++) {
+                    if (std::abs(smoothed_velocity[i]) < 0.002) {
+                        smoothed_velocity[i] = 0.0;
+                    }
+                    if (std::abs(smoothed_angular_velocity[i]) < 0.005) {
+                        smoothed_angular_velocity[i] = 0.0;
                     }
                 }
                 
-                // Additional acceleration limiting - clamp velocity changes
-                const double MAX_VEL_CHANGE = 0.001; // Max change per cycle: 1mm/s
+                // Update target position using smoothed velocities
+                target_position += smoothed_velocity * dt;
                 
-                for (int i = 0; i < 6; i++) {
-                    double vel_change = smoothed_velocities_[i] - prev_velocities_[i];
-                    if (vel_change > MAX_VEL_CHANGE) {
-                        smoothed_velocities_[i] = prev_velocities_[i] + MAX_VEL_CHANGE;
-                    } else if (vel_change < -MAX_VEL_CHANGE) {
-                        smoothed_velocities_[i] = prev_velocities_[i] - MAX_VEL_CHANGE;
-                    }
-                    prev_velocities_[i] = smoothed_velocities_[i];
+                // Update target orientation using smoothed angular velocities
+                if (smoothed_angular_velocity.norm() > 1e-6) {
+                    double angle = smoothed_angular_velocity.norm() * dt;
+                    Eigen::Vector3d axis = smoothed_angular_velocity.normalized();
+                    Eigen::AngleAxisd delta_rot(angle, axis);
+                    target_orientation = target_orientation * delta_rot;
+                    target_orientation.normalize();
                 }
                 
-                franka::CartesianVelocities output = {{
-                    smoothed_velocities_[0], smoothed_velocities_[1], smoothed_velocities_[2],
-                    smoothed_velocities_[3], smoothed_velocities_[4], smoothed_velocities_[5]
-                }};
+                // Get current robot dynamics
+                std::array<double, 7> coriolis_array = model.coriolis(robot_state);
+                std::array<double, 42> jacobian_array = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
                 
-                return output;
+                // Convert to Eigen
+                Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
+                Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
+                Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
+                
+                // Current pose
+                Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
+                Eigen::Vector3d position(transform.translation());
+                Eigen::Quaterniond orientation(transform.linear());
+                
+                // Compute pose error
+                Eigen::Matrix<double, 6, 1> error;
+                error.head(3) << position - target_position;
+                
+                // Orientation error (quaternion)
+                if (target_orientation.coeffs().dot(orientation.coeffs()) < 0.0) {
+                    orientation.coeffs() << -orientation.coeffs();
+                }
+                Eigen::Quaterniond error_quaternion(orientation.inverse() * target_orientation);
+                error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
+                error.tail(3) << -transform.linear() * error.tail(3);
+                
+                // Compute impedance control law
+                Eigen::VectorXd wrench_cartesian = -stiffness * error - damping * (jacobian * dq);
+                
+                // Convert to joint torques
+                Eigen::VectorXd tau_task = jacobian.transpose() * wrench_cartesian;
+                Eigen::VectorXd tau_d = tau_task + coriolis;
+                
+                // Convert to array
+                std::array<double, 7> tau_d_array;
+                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_d;
+                
+                return franka::Torques(tau_d_array);
             };
             
             std::cout << "Joystick control active! Use joystick to move robot." << std::endl;
@@ -214,36 +283,27 @@ public:
             // Control loop with automatic restart after errors
             while (!emergency_stop_) {
                 try {
-                    // Start external velocity control loop
-                    bool motion_finished = false;
-                    auto active_control = robot.startCartesianVelocityControl(
-                        research_interface::robot::Move::ControllerMode::kJointImpedance);
-                    
-                    while (!motion_finished && !emergency_stop_) {
-                        auto read_once_return = active_control->readOnce();
-                        auto robot_state = read_once_return.first;
-                        auto duration = read_once_return.second;
-                        auto cartesian_velocities = callback_control(robot_state, duration);
-                        motion_finished = cartesian_velocities.motion_finished;
-                        active_control->writeOnce(cartesian_velocities);
-                    }
-                    
-                    if (motion_finished) {
-                        std::cout << "Motion finished normally." << std::endl;
-                        break;
-                    }
+                    // Use torque control for impedance control
+                    robot.control(callback_control);
+                    break; // Exit loop when control finishes
                     
                 } catch (const franka::ControlException& e) {
                     std::cout << "Control exception: " << e.what() << std::endl;
                     std::cout << "Running error recovery..." << std::endl;
                     robot.automaticErrorRecovery();
                     
-                    // Reset smoothed velocities but keep prev_velocities to avoid discontinuity
-                    std::fill(smoothed_velocities_.begin(), smoothed_velocities_.end(), 0.0);
-                    // DON'T reset prev_velocities_ - let them naturally decay to zero
+                    // Reset target to current pose to avoid jumps
+                    franka::RobotState current_state = robot.readOnce();
+                    Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(current_state.O_T_EE.data()));
+                    target_position = current_transform.translation();
+                    target_orientation = Eigen::Quaterniond(current_transform.linear());
+                    
+                    // Reset smoothed velocities
+                    smoothed_velocity.setZero();
+                    smoothed_angular_velocity.setZero();
                     
                     std::cout << "Restarting control loop..." << std::endl;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000)); // Longer pause
+                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
                 }
             }
             
