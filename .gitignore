@@ -3,5 +3,8 @@
 /install
 /log
 
+/robot_client/build
+/robot_client/frankx
+
 # vscode
 .vscode
