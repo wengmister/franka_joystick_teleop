@@ -44,25 +44,19 @@ endif()
 # Add executable
 add_executable(franka_joystick_control_client src/franka_joystick_control_client.cpp)
 
-# Link libraries - use static linking
+# Link libraries - frankx includes all necessary dependencies
 target_link_libraries(franka_joystick_control_client
-    Franka::Franka
+    frankx          # This includes Franka::Franka and other dependencies
     Threads::Threads
-    default_motion
-    frankx
     Eigen3::Eigen
     -static-libgcc
     -static-libstdc++
 )
 
-# If you have kinematics library, add it
-if(TARGET kinematics)
-    target_link_libraries(franka_joystick_control_client kinematics)
-endif()
-
-# Include directories
+# Include directories - frankx provides its own headers
 target_include_directories(franka_joystick_control_client PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/frankx/include
 )
 
 # Set RPATH for the executable
