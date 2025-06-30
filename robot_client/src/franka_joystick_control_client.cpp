@@ -30,9 +30,9 @@ struct JoystickCommand {
 };
 
 struct TeleopParams {
-    double max_linear_velocity = 0.15;   // 15cm/s max
-    double max_angular_velocity = 0.05;  // 0.05 rad/s max
-    double velocity_smoothing = 0.1;     // Smoothing factor
+    double max_linear_velocity = 0.10;   // Reduced from 0.15 to 0.10 (10cm/s max)
+    double max_angular_velocity = 0.03;  // Reduced from 0.05 to 0.03 (0.03 rad/s max)
+    double velocity_smoothing = 0.15;    // Increased smoothing factor
     double deadzone_linear = 0.002;      // Linear deadzone
     double deadzone_angular = 0.005;     // Angular deadzone
     

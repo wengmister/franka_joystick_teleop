@@ -17,10 +17,10 @@ class FrankaJoystickPublisher(Node):
         self.declare_parameter('robot_pc_port', 8888)
         
         # Smoothing parameters
-        self.declare_parameter('smoothing_alpha', 0.4)  # Higher = less smoothing (0.1-0.5)
-        self.declare_parameter('max_rate_linear', 2.0)   # Max change rate (units/sec) for linear
-        self.declare_parameter('max_rate_angular', 3.0)  # Max change rate (units/sec) for angular
-        self.declare_parameter('release_decel_factor', 0.1)  # How fast to decelerate on release (0.05-0.2)
+        self.declare_parameter('smoothing_alpha', 0.15)  # Much lower = much more smoothing
+        self.declare_parameter('max_rate_linear', 0.8)   # Much slower max change rate  
+        self.declare_parameter('max_rate_angular', 1.0)  # Much slower max change rate
+        self.declare_parameter('release_decel_factor', 0.02)  # Much slower deceleration on release
         
         self.robot_pc_ip = self.get_parameter('robot_pc_ip').value
         self.robot_pc_port = self.get_parameter('robot_pc_port').value
@@ -114,6 +114,11 @@ class FrankaJoystickPublisher(Node):
                 change = smoothed_val - prev_smoothed
                 limited_change = self.clamp(change, -max_change, max_change)
                 new_val = prev_smoothed + limited_change
+                
+                # Additional safety: clamp maximum change per timestep to prevent hardware discontinuities
+                max_timestep_change = 0.01  # Maximum 0.01 change per timestep (very conservative)
+                final_change = self.clamp(new_val - prev_smoothed, -max_timestep_change, max_timestep_change)
+                new_val = prev_smoothed + final_change
             
             smoothed[key] = new_val
         
