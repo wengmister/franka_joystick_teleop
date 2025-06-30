@@ -29,7 +29,19 @@ struct JoystickCommand {
     bool reset_pose = false;
 };
 
-class ModernFrankaController {
+struct TeleopParams {
+    double max_linear_velocity = 0.15;   // 15cm/s max
+    double max_angular_velocity = 0.05;  // 0.05 rad/s max
+    double velocity_smoothing = 0.1;     // Smoothing factor
+    double deadzone_linear = 0.002;      // Linear deadzone
+    double deadzone_angular = 0.005;     // Angular deadzone
+    
+    // Workspace limits (relative to initial pose)
+    Eigen::Vector3d workspace_min{-0.3, -0.3, -0.2};  // 30cm workspace
+    Eigen::Vector3d workspace_max{0.3, 0.3, 0.2};
+};
+
+class TeleoperationController {
 private:
     std::atomic<bool> running_{true};
     std::atomic<bool> emergency_stop_{false};
@@ -39,16 +51,22 @@ private:
     int server_socket_;
     const int PORT = 8888;
     
-    // Movement limits for impedance control
-    const double MAX_LINEAR_VEL = 0.15;  // 15cm/s max 
-    const double MAX_ANGULAR_VEL = 0.05;  // 0.05 rad/s max
+    // Control parameters
+    TeleopParams config_;
+    
+    // Robot state tracking
+    Eigen::Affine3d initial_pose_;
+    Eigen::Affine3d virtual_target_;
+    Eigen::Vector3d smoothed_velocity_;
+    Eigen::Vector3d smoothed_angular_velocity_;
     
 public:
-    ModernFrankaController() {
+    TeleoperationController() : smoothed_velocity_(Eigen::Vector3d::Zero()), 
+                               smoothed_angular_velocity_(Eigen::Vector3d::Zero()) {
         setupNetworking();
     }
     
-    ~ModernFrankaController() {
+    ~TeleoperationController() {
         running_ = false;
         close(server_socket_);
     }
@@ -84,11 +102,25 @@ public:
                                             (struct sockaddr*)&client_addr, &client_len);
             
             if (bytes_received > 0) {
+                // Null-terminate buffer to prevent reading garbage data
+                buffer[bytes_received] = '\0';
+                
                 JoystickCommand cmd;
-                if (sscanf(buffer, "%lf %lf %lf %lf %lf %lf %d %d",
+                int parsed_count = sscanf(buffer, "%lf %lf %lf %lf %lf %lf %d %d",
                           &cmd.linear_x, &cmd.linear_y, &cmd.linear_z,
                           &cmd.angular_x, &cmd.angular_y, &cmd.angular_z,
-                          (int*)&cmd.emergency_stop, (int*)&cmd.reset_pose) == 8) {
+                          (int*)&cmd.emergency_stop, (int*)&cmd.reset_pose);
+                
+                if (parsed_count == 8) {
+                    // Debug: Show parsed values
+                    static int debug_count = 0;
+                    debug_count++;
+                    if (debug_count % 100 == 0 || cmd.reset_pose || cmd.emergency_stop) {  // Every 100th message or if flags set
+                        std::cout << "UDP DEBUG: Raw buffer: [" << buffer << "]" << std::endl;
+                        std::cout << "UDP DEBUG: Parsed - Linear:[" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z 
+                                  << "] Angular:[" << cmd.angular_x << "," << cmd.angular_y << "," << cmd.angular_z 
+                                  << "] E-Stop:" << cmd.emergency_stop << " Reset:" << cmd.reset_pose << std::endl;
+                    }
                     
                     std::lock_guard<std::mutex> lock(command_mutex_);
                     current_command_ = cmd;
@@ -98,17 +130,218 @@ public:
                         std::cout << "Emergency stop received!" << std::endl;
                     }
                     
+                    if (cmd.reset_pose) {
+                        std::cout << "Reset pose requested!" << std::endl;
+                    }
+                    
                     // Debug output for non-zero commands
                     if (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || std::abs(cmd.linear_z) > 0.01) {
                         std::cout << "Joystick: Left[" << cmd.linear_x << "," << cmd.linear_y 
                                   << "] Right[" << cmd.linear_z << "] -> Robot[fwd=" << cmd.linear_y 
                                   << ", right=" << -cmd.linear_x << ", up=" << cmd.linear_z << "]" << std::endl;
                     }
+                } else {
+                    std::cout << "UDP WARNING: Received malformed packet, parsed " << parsed_count << " values instead of 8" << std::endl;
+                    std::cout << "UDP WARNING: Raw buffer: [" << buffer << "]" << std::endl;
                 }
             }
             
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+    }
+    
+    void resetVirtualTarget() {
+        virtual_target_ = initial_pose_;
+        smoothed_velocity_.setZero();
+        smoothed_angular_velocity_.setZero();
+    }
+    
+    void enforceWorkspaceLimits(Eigen::Affine3d& target) {
+        // Calculate position relative to initial pose
+        Eigen::Vector3d relative_pos = target.translation() - initial_pose_.translation();
+        
+        // Clamp to workspace limits
+        for (int i = 0; i < 3; i++) {
+            relative_pos[i] = std::max(config_.workspace_min[i], 
+                                     std::min(config_.workspace_max[i], relative_pos[i]));
+        }
+        
+        // Update target position
+        target.translation() = initial_pose_.translation() + relative_pos;
+    }
+    
+    void updateVirtualTarget(double dt) {
+        // Get current joystick command
+        JoystickCommand cmd;
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            cmd = current_command_;
+        }
+        
+        // Calculate target velocities from joystick input
+        Eigen::Vector3d target_vel;
+        target_vel[0] = cmd.linear_y * config_.max_linear_velocity;    // forward/backward
+        target_vel[1] = -cmd.linear_x * config_.max_linear_velocity;   // left/right  
+        target_vel[2] = cmd.linear_z * config_.max_linear_velocity;    // up/down
+        
+        Eigen::Vector3d target_angular_vel;
+        target_angular_vel[0] = cmd.angular_x * config_.max_angular_velocity;
+        target_angular_vel[1] = cmd.angular_y * config_.max_angular_velocity;
+        target_angular_vel[2] = cmd.angular_z * config_.max_angular_velocity;
+        
+        // Apply exponential smoothing to velocities
+        smoothed_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_velocity_ + 
+                            config_.velocity_smoothing * target_vel;
+        smoothed_angular_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_angular_velocity_ + 
+                                   config_.velocity_smoothing * target_angular_vel;
+        
+        // Apply deadzone to smoothed velocities
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(smoothed_velocity_[i]) < config_.deadzone_linear) {
+                smoothed_velocity_[i] = 0.0;
+            }
+            if (std::abs(smoothed_angular_velocity_[i]) < config_.deadzone_angular) {
+                smoothed_angular_velocity_[i] = 0.0;
+            }
+        }
+        
+        // Update virtual target position using smoothed velocities
+        virtual_target_.translation() += smoothed_velocity_ * dt;
+        
+        // Update virtual target orientation using smoothed angular velocities
+        if (smoothed_angular_velocity_.norm() > 1e-6) {
+            double angle = smoothed_angular_velocity_.norm() * dt;
+            Eigen::Vector3d axis = smoothed_angular_velocity_.normalized();
+            Eigen::AngleAxisd delta_rot(angle, axis);
+            virtual_target_.linear() = virtual_target_.linear() * delta_rot.toRotationMatrix();
+        }
+        
+        // Enforce workspace limits
+        enforceWorkspaceLimits(virtual_target_);
+    }
+    
+    void updateVirtualTargetDebug(double dt, int iteration) {
+        // Get current joystick command
+        JoystickCommand cmd;
+        {
+            std::lock_guard<std::mutex> lock(command_mutex_);
+            cmd = current_command_;
+        }
+        
+        if (iteration <= 10) {
+            std::cout << "DEBUG updateVirtualTarget: dt=" << dt << ", joystick=[" 
+                      << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
+        }
+        
+        // Calculate target velocities from joystick input
+        Eigen::Vector3d target_vel;
+        target_vel[0] = cmd.linear_y * config_.max_linear_velocity;    // forward/backward
+        target_vel[1] = -cmd.linear_x * config_.max_linear_velocity;   // left/right  
+        target_vel[2] = cmd.linear_z * config_.max_linear_velocity;    // up/down
+        
+        Eigen::Vector3d target_angular_vel;
+        target_angular_vel[0] = cmd.angular_x * config_.max_angular_velocity;
+        target_angular_vel[1] = cmd.angular_y * config_.max_angular_velocity;
+        target_angular_vel[2] = cmd.angular_z * config_.max_angular_velocity;
+        
+        if (iteration <= 10) {
+            std::cout << "DEBUG: target_vel=[" << target_vel.transpose() << "]" << std::endl;
+            std::cout << "DEBUG: smoothed_velocity_ before=[" << smoothed_velocity_.transpose() << "]" << std::endl;
+        }
+        
+        // Apply exponential smoothing to velocities
+        Eigen::Vector3d prev_smoothed_velocity = smoothed_velocity_;
+        smoothed_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_velocity_ + 
+                            config_.velocity_smoothing * target_vel;
+        smoothed_angular_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_angular_velocity_ + 
+                                   config_.velocity_smoothing * target_angular_vel;
+        
+        if (iteration <= 10) {
+            std::cout << "DEBUG: smoothed_velocity_ after=[" << smoothed_velocity_.transpose() << "]" << std::endl;
+        }
+        
+        // Apply deadzone to smoothed velocities
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(smoothed_velocity_[i]) < config_.deadzone_linear) {
+                smoothed_velocity_[i] = 0.0;
+            }
+            if (std::abs(smoothed_angular_velocity_[i]) < config_.deadzone_angular) {
+                smoothed_angular_velocity_[i] = 0.0;
+            }
+        }
+        
+        if (iteration <= 10) {
+            std::cout << "DEBUG: smoothed_velocity_ after deadzone=[" << smoothed_velocity_.transpose() << "]" << std::endl;
+        }
+        
+        // Store previous position for debugging
+        Eigen::Vector3d prev_position = virtual_target_.translation();
+        
+        // Update virtual target position using smoothed velocities
+        virtual_target_.translation() += smoothed_velocity_ * dt;
+        
+        if (iteration <= 10) {
+            std::cout << "DEBUG: position change=[" << (virtual_target_.translation() - prev_position).transpose() << "]" << std::endl;
+            std::cout << "DEBUG: new position=[" << virtual_target_.translation().transpose() << "]" << std::endl;
+        }
+        
+        // Update virtual target orientation using smoothed angular velocities
+        if (smoothed_angular_velocity_.norm() > 1e-6) {
+            double angle = smoothed_angular_velocity_.norm() * dt;
+            Eigen::Vector3d axis = smoothed_angular_velocity_.normalized();
+            Eigen::AngleAxisd delta_rot(angle, axis);
+            virtual_target_.linear() = virtual_target_.linear() * delta_rot.toRotationMatrix();
+            
+            if (iteration <= 10) {
+                std::cout << "DEBUG: Applied rotation, angle=" << angle << std::endl;
+            }
+        }
+        
+        // Enforce workspace limits
+        Eigen::Vector3d pos_before_limits = virtual_target_.translation();
+        enforceWorkspaceLimits(virtual_target_);
+        
+        if (iteration <= 10 && (virtual_target_.translation() - pos_before_limits).norm() > 1e-6) {
+            std::cout << "DEBUG: Workspace limits applied, change=[" 
+                      << (virtual_target_.translation() - pos_before_limits).transpose() << "]" << std::endl;
+        }
+    }
+    
+    franka::CartesianPose eigenToCartesianPose(const Eigen::Affine3d& pose) {
+        std::array<double, 16> pose_array;
+        Eigen::Map<Eigen::Matrix4d>(pose_array.data()) = pose.matrix();
+        return franka::CartesianPose(pose_array);
+    }
+    
+    void teleoperation_loop(franka::Robot& robot) {
+        std::cout << "Starting teleoperation loop at 100Hz..." << std::endl;
+        
+        const auto loop_duration = std::chrono::milliseconds(10); // 100Hz
+        auto next_iteration_time = std::chrono::steady_clock::now();
+        
+        while (running_ && !emergency_stop_) {
+            next_iteration_time += loop_duration;
+            
+            // Update virtual target based on joystick input
+            updateVirtualTarget(0.01); // 10ms = 0.01s
+            
+            // Send target to robot through active motion generator
+            try {
+                franka::CartesianPose pose_command = eigenToCartesianPose(virtual_target_);
+                
+                // Here we would use robot.writeOnce(pose_command) if we had an active motion generator
+                // For now, we'll implement this differently using the available API
+                
+            } catch (const franka::Exception& e) {
+                std::cout << "Control exception in teleoperation loop: " << e.what() << std::endl;
+                break;
+            }
+            
+            // Maintain 100Hz timing
+            std::this_thread::sleep_until(next_iteration_time);
+        }
+        
+        std::cout << "Teleoperation loop finished." << std::endl;
     }
     
     void run(const std::string& robot_ip) {
@@ -134,9 +367,11 @@ public:
                 {{40.0, 40.0, 40.0, 30.0, 30.0, 25.0}}, {{30.0, 30.0, 30.0, 25.0, 25.0, 25.0}},
                 {{40.0, 40.0, 40.0, 30.0, 30.0, 25.0}}, {{30.0, 30.0, 30.0, 25.0, 25.0, 25.0}});
             
+            // Configure cartesian impedance for more responsive control
+            robot.setCartesianImpedance({{1500, 1500, 1500, 150, 150, 150}});
+            
             // Configure custom end-effector (0.7kg mass)
-            // TODO: Update COM and inertia matrix when available
-            std::array<double, 16> EE_T_K = {{1.0, 0.0, 0.0, 0.0,  // Identity transformation for now
+            std::array<double, 16> EE_T_K = {{1.0, 0.0, 0.0, 0.0,
                                               0.0, 1.0, 0.0, 0.0,
                                               0.0, 0.0, 1.0, 0.0,
                                               0.0, 0.0, 0.0, 1.0}};
@@ -144,168 +379,28 @@ public:
             
             // Set end-effector mass and inertia
             double ee_mass = 0.7;  // 0.7kg custom end-effector
-            std::array<double, 3> ee_com = {{0.0, 0.0, 0.05}};  // COM offset from flange (update when known)
-            std::array<double, 9> ee_inertia = {{0.01, 0.0, 0.0,   // Inertia matrix (update when calculated)
+            std::array<double, 3> ee_com = {{0.0, 0.0, 0.05}};
+            std::array<double, 9> ee_inertia = {{0.01, 0.0, 0.0,
                                                  0.0, 0.01, 0.0,
                                                  0.0, 0.0, 0.01}};
             robot.setLoad(ee_mass, ee_com, ee_inertia);
             
             std::cout << "Configured custom end-effector: mass=" << ee_mass << "kg" << std::endl;
             
-            std::cout << "Starting network thread..." << std::endl;
-            std::thread network_thread(&ModernFrankaController::networkThread, this);
+            // Get initial pose and set as virtual target
+            franka::RobotState initial_state = robot.readOnce();
+            initial_pose_ = Eigen::Affine3d(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
+            virtual_target_ = initial_pose_;
             
-            std::cout << "Starting joystick control. Move joystick to control robot." << std::endl;
+            std::cout << "Initial pose set. Starting network thread..." << std::endl;
+            std::thread network_thread(&TeleoperationController::networkThread, this);
+            
+            std::cout << "Starting cartesian impedance control with pose motion generator..." << std::endl;
             std::cout << "Press joystick B button for emergency stop." << std::endl;
             
-            // Impedance control parameters
-            Eigen::Matrix<double, 6, 6> stiffness = Eigen::MatrixXd::Zero(6, 6);
-            Eigen::Matrix<double, 6, 6> damping = Eigen::MatrixXd::Zero(6, 6);
-            
-            // Increased stiffness for more responsive control
-            stiffness.topLeftCorner(3, 3) << 1500.0 * Eigen::MatrixXd::Identity(3, 3);  // Translational: 1200 N/m
-            stiffness.bottomRightCorner(3, 3) << 100.0 * Eigen::MatrixXd::Identity(3, 3); // Rotational: 100 Nm/rad
-            
-            // Reduced damping for more natural motion
-            damping.topLeftCorner(3, 3) << 1.5 * sqrt(1500.0) * Eigen::MatrixXd::Identity(3, 3);
-            damping.bottomRightCorner(3, 3) << 1.5 * sqrt(100.0) * Eigen::MatrixXd::Identity(3, 3);
-            
-            // Initial target pose
-            franka::Model model = robot.loadModel();
-            franka::RobotState initial_state = robot.readOnce();
-            Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
-            Eigen::Vector3d target_position = initial_transform.translation();
-            Eigen::Quaterniond target_orientation(initial_transform.linear());
-            
-            // Smoothing variables for target updates
-            Eigen::Vector3d smoothed_velocity = Eigen::Vector3d::Zero();
-            Eigen::Vector3d smoothed_angular_velocity = Eigen::Vector3d::Zero();
-            const double VELOCITY_SMOOTHING = 0.1;  // Smoothing factor for target velocity
-
-            // Create impedance control callback
-            auto callback_control = [this, &model, &stiffness, &damping, &target_position, &target_orientation, 
-                                   &smoothed_velocity, &smoothed_angular_velocity, VELOCITY_SMOOTHING]
-                                  (const franka::RobotState& robot_state, franka::Duration period) -> franka::Torques {
-                
-                // Check for emergency stop
-                if (emergency_stop_) {
-                    std::cout << "Emergency stop activated!" << std::endl;
-                    return franka::MotionFinished(franka::Torques({0, 0, 0, 0, 0, 0, 0}));
-                }
-                
-                // Get current joystick command
-                JoystickCommand cmd;
-                {
-                    std::lock_guard<std::mutex> lock(command_mutex_);
-                    cmd = current_command_;
-                }
-                
-                // Smooth joystick input to target velocities
-                double dt = period.toSec();
-                Eigen::Vector3d target_vel;
-                target_vel[0] = cmd.linear_y * MAX_LINEAR_VEL;    // forward/backward
-                target_vel[1] = -cmd.linear_x * MAX_LINEAR_VEL;   // left/right  
-                target_vel[2] = cmd.linear_z * MAX_LINEAR_VEL;    // up/down
-                
-                Eigen::Vector3d target_angular_vel;
-                target_angular_vel[0] = cmd.angular_x * MAX_ANGULAR_VEL;
-                target_angular_vel[1] = cmd.angular_y * MAX_ANGULAR_VEL;
-                target_angular_vel[2] = cmd.angular_z * MAX_ANGULAR_VEL;
-                
-                // Apply exponential smoothing to velocities
-                smoothed_velocity = (1.0 - VELOCITY_SMOOTHING) * smoothed_velocity + VELOCITY_SMOOTHING * target_vel;
-                smoothed_angular_velocity = (1.0 - VELOCITY_SMOOTHING) * smoothed_angular_velocity + VELOCITY_SMOOTHING * target_angular_vel;
-                
-                // Apply deadzone to smoothed velocities
-                for (int i = 0; i < 3; i++) {
-                    if (std::abs(smoothed_velocity[i]) < 0.002) {
-                        smoothed_velocity[i] = 0.0;
-                    }
-                    if (std::abs(smoothed_angular_velocity[i]) < 0.005) {
-                        smoothed_angular_velocity[i] = 0.0;
-                    }
-                }
-                
-                // Update target position using smoothed velocities
-                target_position += smoothed_velocity * dt;
-                
-                // Update target orientation using smoothed angular velocities
-                if (smoothed_angular_velocity.norm() > 1e-6) {
-                    double angle = smoothed_angular_velocity.norm() * dt;
-                    Eigen::Vector3d axis = smoothed_angular_velocity.normalized();
-                    Eigen::AngleAxisd delta_rot(angle, axis);
-                    target_orientation = target_orientation * delta_rot;
-                    target_orientation.normalize();
-                }
-                
-                // Get current robot dynamics
-                std::array<double, 7> coriolis_array = model.coriolis(robot_state);
-                std::array<double, 42> jacobian_array = model.zeroJacobian(franka::Frame::kEndEffector, robot_state);
-                
-                // Convert to Eigen
-                Eigen::Map<const Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
-                Eigen::Map<const Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
-                Eigen::Map<const Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
-                
-                // Current pose
-                Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
-                Eigen::Vector3d position(transform.translation());
-                Eigen::Quaterniond orientation(transform.linear());
-                
-                // Compute pose error
-                Eigen::Matrix<double, 6, 1> error;
-                error.head(3) << position - target_position;
-                
-                // Orientation error (quaternion)
-                if (target_orientation.coeffs().dot(orientation.coeffs()) < 0.0) {
-                    orientation.coeffs() << -orientation.coeffs();
-                }
-                Eigen::Quaterniond error_quaternion(orientation.inverse() * target_orientation);
-                error.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
-                error.tail(3) << -transform.linear() * error.tail(3);
-                
-                // Compute impedance control law
-                Eigen::VectorXd wrench_cartesian = -stiffness * error - damping * (jacobian * dq);
-                
-                // Convert to joint torques
-                Eigen::VectorXd tau_task = jacobian.transpose() * wrench_cartesian;
-                Eigen::VectorXd tau_d = tau_task + coriolis;
-                
-                // Convert to array
-                std::array<double, 7> tau_d_array;
-                Eigen::VectorXd::Map(&tau_d_array[0], 7) = tau_d;
-                
-                return franka::Torques(tau_d_array);
-            };
-            
-            std::cout << "Joystick control active! Use joystick to move robot." << std::endl;
-            
-            // Control loop with automatic restart after errors
-            while (!emergency_stop_) {
-                try {
-                    // Use torque control for impedance control
-                    robot.control(callback_control);
-                    break; // Exit loop when control finishes
-                    
-                } catch (const franka::ControlException& e) {
-                    std::cout << "Control exception: " << e.what() << std::endl;
-                    std::cout << "Running error recovery..." << std::endl;
-                    robot.automaticErrorRecovery();
-                    
-                    // Reset target to current pose to avoid jumps
-                    franka::RobotState current_state = robot.readOnce();
-                    Eigen::Affine3d current_transform(Eigen::Matrix4d::Map(current_state.O_T_EE.data()));
-                    target_position = current_transform.translation();
-                    target_orientation = Eigen::Quaterniond(current_transform.linear());
-                    
-                    // Reset smoothed velocities
-                    smoothed_velocity.setZero();
-                    smoothed_angular_velocity.setZero();
-                    
-                    std::cout << "Restarting control loop..." << std::endl;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(1000));
-                }
-            }
+            // Instead of using ActiveMotionGenerator (which we need to research more),
+            // let's implement a simplified version using regular cartesian pose control
+            this->runRobustTeleop(robot);
             
             std::cout << "Joystick control finished." << std::endl;
             running_ = false;
@@ -319,6 +414,130 @@ public:
             running_ = false;
         }
     }
+    
+private:
+    void runRobustTeleop(franka::Robot& robot) {
+        std::cout << "DEBUG: Starting robust teleop with safe reset handling..." << std::endl;
+        
+        // Add error recovery and delay after joint motion (proven to work)
+        try {
+            std::cout << "DEBUG: Running automatic error recovery..." << std::endl;
+            robot.automaticErrorRecovery();
+            std::cout << "DEBUG: Error recovery completed." << std::endl;
+        } catch (const franka::Exception& e) {
+            std::cout << "DEBUG: Error recovery failed (this might be normal): " << e.what() << std::endl;
+        }
+        
+        // Wait for robot to settle (proven to work)
+        std::cout << "DEBUG: Waiting 2 seconds for robot to settle..." << std::endl;
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        
+        // Reset smoothed velocities to ensure clean start
+        smoothed_velocity_.setZero();
+        smoothed_angular_velocity_.setZero();
+        std::cout << "DEBUG: Reset smoothed velocities to zero" << std::endl;
+        
+        // Read current state for reference (proven to work)
+        franka::RobotState reference_state = robot.readOnce();
+        std::cout << "DEBUG: Reference pose obtained." << std::endl;
+        
+        // Initialize virtual target to current desired pose
+        Eigen::Affine3d current_pose(Eigen::Matrix4d::Map(reference_state.O_T_EE_d.data()));
+        virtual_target_ = current_pose;
+        initial_pose_ = current_pose;
+        std::cout << "DEBUG: Virtual target initialized to desired pose." << std::endl;
+        std::cout << "  Position: [" << current_pose.translation().transpose() << "]" << std::endl;
+        
+        static int iteration_count = 0;
+        iteration_count = 0;  // Reset counter
+        
+        // Flag for safe reset handling
+        std::atomic<bool> reset_requested{false};
+        
+        // Robust teleop motion generator with safe reset handling
+        auto robust_teleop_generator = [this, &iteration_count, &reset_requested](const franka::RobotState& robot_state, 
+                                                                                 franka::Duration period) -> franka::CartesianPose {
+            
+            iteration_count++;
+            double dt = period.toSec();
+            
+            // Only debug first 5 iterations to reduce spam
+            if (iteration_count <= 5) {
+                std::cout << "ROBUST: Iteration " << iteration_count << ", dt=" << dt << std::endl;
+            }
+            
+            // Check for emergency stop
+            if (emergency_stop_) {
+                std::cout << "ROBUST: Emergency stop detected, finishing motion" << std::endl;
+                return franka::MotionFinished(eigenToCartesianPose(virtual_target_));
+            }
+            
+            // Update virtual target based on joystick input (only after stability period)
+            if (iteration_count > 10 && dt > 0.0) {
+                // Get current joystick command
+                JoystickCommand cmd;
+                {
+                    std::lock_guard<std::mutex> lock(command_mutex_);
+                    cmd = current_command_;
+                }
+                
+                // Handle reset pose safely - gradual return to initial pose instead of jump
+                if (cmd.reset_pose && !reset_requested) {
+                    std::cout << "ROBUST: Reset pose requested - gradual return to initial" << std::endl;
+                    reset_requested = true;
+                }
+                
+                // If reset is requested, gradually move back to initial pose
+                if (reset_requested) {
+                    Eigen::Vector3d to_initial = initial_pose_.translation() - virtual_target_.translation();
+                    double distance = to_initial.norm();
+                    
+                    if (distance > 0.01) {  // 1cm threshold
+                        // Move gradually towards initial pose
+                        Eigen::Vector3d reset_velocity = to_initial.normalized() * 0.05;  // 5cm/s
+                        virtual_target_.translation() += reset_velocity * dt;
+                    } else {
+                        // Close enough, reset complete
+                        virtual_target_ = initial_pose_;
+                        reset_requested = false;
+                        smoothed_velocity_.setZero();
+                        smoothed_angular_velocity_.setZero();
+                        std::cout << "ROBUST: Reset complete" << std::endl;
+                    }
+                } else {
+                    // Normal joystick control - only if not resetting
+                    if (!cmd.reset_pose) {
+                        // Store previous position for debugging (only occasionally)
+                        Eigen::Vector3d prev_position = virtual_target_.translation();
+                        
+                        // Update virtual target using the working update method
+                        updateVirtualTarget(dt);
+                        
+                        // Debug position changes only if significant or occasionally
+                        double pos_change = (virtual_target_.translation() - prev_position).norm();
+                        if (pos_change > 0.005 || (iteration_count % 1000 == 0)) {  // Every 1000 iterations (1 second)
+                            std::cout << "ROBUST: Position change: " << pos_change << " m" << std::endl;
+                        }
+                    }
+                }
+            } else if (iteration_count <= 10) {
+                if (iteration_count <= 5) {
+                    std::cout << "ROBUST: Stability period, iteration " << iteration_count << std::endl;
+                }
+            }
+            
+            // Return virtual target as CartesianPose
+            return eigenToCartesianPose(virtual_target_);
+        };
+        
+        try {
+            std::cout << "DEBUG: Starting robust teleop motion generator..." << std::endl;
+            robot.control(robust_teleop_generator);
+            std::cout << "DEBUG: Robust teleop motion generator finished normally." << std::endl;
+        } catch (const franka::ControlException& e) {
+            std::cout << "DEBUG: Robust teleop control exception: " << e.what() << std::endl;
+        }
+    }
 };
 
 int main(int argc, char** argv) {
@@ -328,7 +547,7 @@ int main(int argc, char** argv) {
     }
     
     try {
-        ModernFrankaController controller;
+        TeleoperationController controller;
         controller.run(argv[1]);
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
