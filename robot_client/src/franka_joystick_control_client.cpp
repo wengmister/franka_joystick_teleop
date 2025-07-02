@@ -48,21 +48,21 @@ private:
     
     // Trajectory parameters - designed to prevent acceleration discontinuities
     struct TrajParams {
-        double max_velocity = 0.05;           // 5cm/s
-        double max_acceleration = 0.02;       // 2cm/s² - conservative
+        double max_velocity = 0.08;           // 8cm/s
+        double max_acceleration = 0.04;       // 4cm/s² - conservative
         double max_jerk = 0.05;              // 5cm/s³ - jerk limiting
-        double max_angular_velocity = 0.2;    // 0.2 rad/s
-        double max_angular_acceleration = 0.1; // 0.1 rad/s²
+        double max_angular_velocity = 0.3;    // 0.3 rad/s
+        double max_angular_acceleration = 0.15; // 0.15 rad/s²
         double max_angular_jerk = 0.2;        // 0.2 rad/s³
         
         // Input processing
-        double input_filter_freq = 10.0;     // 10Hz low-pass filter
+        double input_filter_freq = 20.0;     // 20Hz low-pass filter
         double deadzone_linear = 0.005;
         double deadzone_angular = 0.01;
         
         // Trajectory timing
         double trajectory_dt = 0.001;        // 1ms trajectory resolution
-        double lookahead_time = 0.1;         // 100ms lookahead
+        double lookahead_time = 0.05;         // 50ms lookahead
     } params_;
     
     // Current trajectory state
@@ -166,7 +166,7 @@ private:
         desired_angular[1] = cmd.axis1 * params_.max_angular_velocity;
         desired_angular[2] = cmd.axis3 * params_.max_angular_velocity;
         
-        // Apply deadzone
+        // Apply deadzone (but don't force to zero - let filter handle it)
         for (int i = 0; i < 3; i++) {
             if (std::abs(desired_linear[i]) < params_.deadzone_linear) {
                 desired_linear[i] = 0.0;
@@ -176,21 +176,38 @@ private:
             }
         }
         
-        // Low-pass filter (simple first-order)
+        // Low-pass filter with gentle convergence
         double alpha = params_.input_filter_freq * dt / (1.0 + params_.input_filter_freq * dt);
+        
+        // Apply filtering normally - no hard zeroing
         filtered_linear_input_ = (1.0 - alpha) * filtered_linear_input_ + alpha * desired_linear;
         filtered_angular_input_ = (1.0 - alpha) * filtered_angular_input_ + alpha * desired_angular;
+        
+        // Debug filtered inputs occasionally
+        static int filter_debug_count = 0;
+        filter_debug_count++;
+        if (filter_debug_count % 5000 == 0 && (filtered_linear_input_.norm() > 1e-5 || filtered_angular_input_.norm() > 1e-5)) {
+            std::cout << "Filtered inputs: Lin=[" << filtered_linear_input_.transpose() 
+                      << "] Ang=[" << filtered_angular_input_.transpose() << "]" << std::endl;
+        }
     }
     
     TrajectoryPoint generateNextTrajectoryPoint(double dt) {
         TrajectoryPoint next_point = current_point_;
         next_point.time += dt;
         
-        // Generate smooth trajectory using jerk-limited motion
+        // Generate smooth trajectory with gentle damping (no hard zeroing)
         for (int i = 0; i < 3; i++) {
-            // Linear motion with jerk limiting
+            // Linear motion with gentle convergence
             double desired_vel = filtered_linear_input_[i];
             double vel_error = desired_vel - current_point_.velocity[i];
+            
+            // Apply gentle damping when input is very small
+            double damping_factor = 1.0;
+            if (std::abs(desired_vel) < 1e-4) {
+                // Gentle exponential decay instead of hard zeroing
+                damping_factor = 0.98;  // Very gentle 2% reduction per iteration
+            }
             
             // Limit acceleration based on velocity error
             double desired_accel = vel_error / dt;
@@ -203,12 +220,22 @@ private:
             // Update acceleration with jerk limit
             next_point.acceleration[i] = current_point_.acceleration[i] + jerk * dt;
             
+            // Apply gentle damping to acceleration when no input
+            if (std::abs(desired_vel) < 1e-4) {
+                next_point.acceleration[i] *= damping_factor;
+            }
+            
             // Limit acceleration magnitude
             next_point.acceleration[i] = std::max(-params_.max_acceleration,
                                         std::min(params_.max_acceleration, next_point.acceleration[i]));
             
             // Update velocity with acceleration
             next_point.velocity[i] = current_point_.velocity[i] + next_point.acceleration[i] * dt;
+            
+            // Apply gentle damping to velocity when no input
+            if (std::abs(desired_vel) < 1e-4) {
+                next_point.velocity[i] *= damping_factor;
+            }
             
             // Limit velocity magnitude
             next_point.velocity[i] = std::max(-params_.max_velocity,
@@ -217,9 +244,16 @@ private:
             // Update position with velocity
             next_point.position[i] = current_point_.position[i] + next_point.velocity[i] * dt;
             
-            // Angular motion (similar process)
+            // Angular motion with same gentle approach
             double desired_angular_vel = filtered_angular_input_[i];
             double angular_vel_error = desired_angular_vel - current_point_.angular_velocity[i];
+            
+            // Apply gentle damping for angular motion
+            double angular_damping_factor = 1.0;
+            if (std::abs(desired_angular_vel) < 1e-4) {
+                angular_damping_factor = 0.98;  // Same gentle damping
+            }
+            
             double desired_angular_accel = angular_vel_error / dt;
             double angular_accel_error = desired_angular_accel - current_point_.angular_acceleration[i];
             
@@ -227,21 +261,37 @@ private:
                                  std::min(params_.max_angular_jerk, angular_accel_error / dt));
             
             next_point.angular_acceleration[i] = current_point_.angular_acceleration[i] + angular_jerk * dt;
+            
+            // Apply gentle damping to angular acceleration
+            if (std::abs(desired_angular_vel) < 1e-4) {
+                next_point.angular_acceleration[i] *= angular_damping_factor;
+            }
+            
             next_point.angular_acceleration[i] = std::max(-params_.max_angular_acceleration,
                                                 std::min(params_.max_angular_acceleration, next_point.angular_acceleration[i]));
             
             next_point.angular_velocity[i] = current_point_.angular_velocity[i] + next_point.angular_acceleration[i] * dt;
+            
+            // Apply gentle damping to angular velocity
+            if (std::abs(desired_angular_vel) < 1e-4) {
+                next_point.angular_velocity[i] *= angular_damping_factor;
+            }
+            
             next_point.angular_velocity[i] = std::max(-params_.max_angular_velocity,
                                             std::min(params_.max_angular_velocity, next_point.angular_velocity[i]));
         }
         
-        // Update orientation using angular velocity
-        if (next_point.angular_velocity.norm() > 1e-6) {
+        // Update orientation using angular velocity (no threshold check)
+        if (next_point.angular_velocity.norm() > 0.0) {
             double angle = next_point.angular_velocity.norm() * dt;
-            Eigen::Vector3d axis = next_point.angular_velocity.normalized();
-            Eigen::Quaterniond delta_quat(Eigen::AngleAxisd(angle, axis));
-            next_point.orientation = current_point_.orientation * delta_quat;
-            next_point.orientation.normalize();
+            if (angle > 1e-8) {  // Only very tiny threshold to avoid numerical issues
+                Eigen::Vector3d axis = next_point.angular_velocity.normalized();
+                Eigen::Quaterniond delta_quat(Eigen::AngleAxisd(angle, axis));
+                next_point.orientation = current_point_.orientation * delta_quat;
+                next_point.orientation.normalize();
+            } else {
+                next_point.orientation = current_point_.orientation;
+            }
         } else {
             next_point.orientation = current_point_.orientation;
         }
@@ -254,8 +304,8 @@ private:
     
     void enforceWorkspaceLimits(TrajectoryPoint& point) {
         Eigen::Vector3d relative_pos = point.position - initial_pose_.translation();
-        Eigen::Vector3d workspace_min{-0.2, -0.2, -0.1};
-        Eigen::Vector3d workspace_max{0.5, 0.2, 0.5};
+        Eigen::Vector3d workspace_min{-0.25, -0.25, -0.25};
+        Eigen::Vector3d workspace_max{0.25, 0.25, 0.25};
         
         bool hit_limit = false;
         for (int i = 0; i < 3; i++) {
@@ -309,10 +359,10 @@ public:
             
             // Configure robot for smooth operation
             robot.setCollisionBehavior(
-                {{60.0, 60.0, 50.0, 50.0, 50.0, 50.0, 40.0}}, {{60.0, 60.0, 50.0, 50.0, 50.0, 50.0, 40.0}},
-                {{60.0, 60.0, 50.0, 50.0, 50.0, 50.0, 40.0}}, {{60.0, 60.0, 50.0, 50.0, 50.0, 50.0, 40.0}},
-                {{60.0, 60.0, 60.0, 50.0, 50.0, 40.0}}, {{50.0, 50.0, 50.0, 40.0, 40.0, 40.0}},
-                {{60.0, 60.0, 60.0, 50.0, 50.0, 40.0}}, {{50.0, 50.0, 50.0, 40.0, 40.0, 40.0}});
+                {{100.0, 100.0, 80.0, 80.0, 80.0, 80.0, 60.0}}, {{100.0, 100.0, 80.0, 80.0, 80.0, 80.0, 60.0}},
+                {{100.0, 100.0, 80.0, 80.0, 80.0, 80.0, 60.0}}, {{100.0, 100.0, 80.0, 80.0, 80.0, 80.0, 60.0}},
+                {{80.0, 80.0, 80.0, 80.0, 80.0, 80.0}}, {{80.0, 80.0, 80.0, 80.0, 80.0, 80.0}},
+                {{80.0, 80.0, 80.0, 80.0, 80.0, 80.0}}, {{80.0, 80.0, 80.0, 80.0, 80.0, 80.0}});
             
             // Lower impedance for smoother motion
             robot.setCartesianImpedance({{500, 500, 500, 50, 50, 50}});
@@ -373,11 +423,17 @@ private:
                 filterInputs(cmd, dt);
                 current_point_ = generateNextTrajectoryPoint(dt);
                 
-                // Debug output
+                // Debug output with gentler stability monitoring
                 if (iteration_count % 2000 == 0) {
+                    bool is_nearly_stable = (current_point_.velocity.norm() < 1e-3 && 
+                                           current_point_.acceleration.norm() < 1e-3 &&
+                                           current_point_.angular_velocity.norm() < 1e-3 &&
+                                           current_point_.angular_acceleration.norm() < 1e-3);
+                    
                     std::cout << "Traj: pos=" << current_point_.position.norm() 
                               << " vel=" << current_point_.velocity.norm()
-                              << " accel=" << current_point_.acceleration.norm() << std::endl;
+                              << " accel=" << current_point_.acceleration.norm() 
+                              << (is_nearly_stable ? " [NEARLY_STABLE]" : " [MOVING]") << std::endl;
                 }
             }
             
