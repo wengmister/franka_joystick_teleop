@@ -4,8 +4,8 @@
 // NEW JOYSTICK CONTROL MAPPING:
 // =============================
 // D-pad (axes 6,7):    Robot translation (forward/back, left/right)
-// Left stick (axes 0,1):   End-effector orientation (yaw/pitch)  
-// Right stick (axes 3,4):  Z-movement (vertical) + roll rotation
+// Left stick (axes 0,1):   End-effector orientation (roll/pitch)  
+// Right stick (axes 3,4):  Z-movement (vertical) + yaw rotation
 // Triggers (axes 2,5):     Unused
 //
 // Motion is smoothed and step-limited to prevent discontinuities
@@ -44,7 +44,7 @@ struct JoystickCommand {
 
 struct TeleopParams {
     double max_linear_velocity = 0.10;   // Reduced from 0.15 to 0.10 (10cm/s max)
-    double max_angular_velocity = 0.03;  // Reduced from 0.05 to 0.03 (0.03 rad/s max)
+    double max_angular_velocity = 0.05;  // 0.05 rad/s max
     double velocity_smoothing = 0.25;    // Increased smoothing factor from 0.15 to 0.25
     double deadzone_linear = 0.005;      // Increased linear deadzone from 0.002 to 0.005
     double deadzone_angular = 0.01;      // Increased angular deadzone from 0.005 to 0.01
@@ -55,11 +55,11 @@ struct TeleopParams {
     
     // Input filtering parameters (smooth raw joystick before velocity conversion)
     double input_smoothing = 0.8;        // Much more aggressive smoothing factor (was 0.4)
-    double input_max_change = 0.005;     // Much smaller maximum allowed change (was 0.02)
+    double input_max_change = 0.01;     // Much smaller maximum allowed change (was 0.02)
     
     // Maximum step size constraints (prevents discontinuities)
     double max_step_size = 0.005;        // Reduced: Maximum position change per step (5mm)
-    double max_angular_step = 0.002;     // Reduced: Maximum angular change per step (0.002 rad ≈ 0.1°)
+    double max_angular_step = 0.005;     // Reduced: Maximum angular change per step (0.005 rad ≈ 0.28°)
     
     // Workspace limits (relative to initial pose)
     Eigen::Vector3d workspace_min{-0.3, -0.3, -0.2};  // 30cm workspace
@@ -272,9 +272,9 @@ public:
         target_vel[2] = cmd.axis4 * config_.max_linear_velocity;    // Right stick vertical -> up/down
         
         Eigen::Vector3d target_angular_vel;
-        target_angular_vel[0] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> roll
+        target_angular_vel[0] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> roll (SWAPPED)
         target_angular_vel[1] = cmd.axis1 * config_.max_angular_velocity;  // Left stick vertical -> pitch  
-        target_angular_vel[2] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> yaw
+        target_angular_vel[2] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> yaw (SWAPPED)
         
         // Apply extra aggressive smoothing for very small noisy inputs
         double smoothing_factor = config_.velocity_smoothing;
@@ -380,9 +380,9 @@ public:
         target_vel[2] = cmd.axis4 * config_.max_linear_velocity;    // Right stick vertical -> up/down
         
         Eigen::Vector3d target_angular_vel;
-        target_angular_vel[0] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> roll
+        target_angular_vel[0] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> roll (SWAPPED)
         target_angular_vel[1] = cmd.axis1 * config_.max_angular_velocity;  // Left stick vertical -> pitch  
-        target_angular_vel[2] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> yaw
+        target_angular_vel[2] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> yaw (SWAPPED)
         
         if (iteration <= 10) {
             std::cout << "DEBUG: target_vel=[" << target_vel.transpose() << "]" << std::endl;

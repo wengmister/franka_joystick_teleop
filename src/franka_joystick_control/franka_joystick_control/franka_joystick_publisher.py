@@ -66,8 +66,8 @@ class FrankaJoystickPublisher(Node):
         self.get_logger().info('Franka Joystick Publisher started with smoothing')
         self.get_logger().info('NEW CONTROL MAPPING:')
         self.get_logger().info('  D-pad (axes 6,7): Robot translation (forward/back, left/right)')
-        self.get_logger().info('  Left stick (axes 0,1): End-effector orientation (yaw/pitch)')
-        self.get_logger().info('  Right stick (axes 3,4): Z-movement + roll rotation')
+        self.get_logger().info('  Left stick (axes 0,1): End-effector orientation (roll/pitch)')
+        self.get_logger().info('  Right stick (axes 3,4): Z-movement + yaw rotation')
         self.get_logger().info('  Triggers (axes 2,5): Currently unused')
         self.get_logger().info('  A button: Reset pose')
         self.get_logger().info('  B button: Emergency stop')
@@ -113,7 +113,7 @@ class FrankaJoystickPublisher(Node):
                 
                 # Then apply rate limiting
                 # Use angular limits for orientation axes (0,1,3), linear limits for translation axes (4,6,7)
-                is_angular_axis = key in ['axis0', 'axis1', 'axis3']  # yaw, pitch, roll
+                is_angular_axis = key in ['axis0', 'axis1', 'axis3']  # roll, pitch, yaw
                 max_change = (self.max_rate_angular if is_angular_axis else self.max_rate_linear) * dt
                 change = smoothed_val - prev_smoothed
                 limited_change = self.clamp(change, -max_change, max_change)
