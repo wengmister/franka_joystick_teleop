@@ -6,7 +6,6 @@ from rclpy.node import Node
 from sensor_msgs.msg import Joy
 import socket
 import time
-import math
 
 class FrankaJoystickPublisher(Node):
     def __init__(self):
@@ -53,7 +52,7 @@ class FrankaJoystickPublisher(Node):
         # Scaling and deadzone
         self.LINEAR_SCALE = 1.0
         self.ANGULAR_SCALE = 1.0
-        self.DEADZONE = 0.1
+        self.DEADZONE = 0.001
         
         # Smoothing state
         self.smoothed_values = {
