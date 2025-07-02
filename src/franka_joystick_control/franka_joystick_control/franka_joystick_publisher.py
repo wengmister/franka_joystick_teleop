@@ -16,10 +16,10 @@ class FrankaJoystickPublisher(Node):
         self.declare_parameter('robot_pc_port', 8888)
         
         # Smoothing parameters
-        self.declare_parameter('smoothing_alpha', 0.2)  # More smoothing
-        self.declare_parameter('max_rate_linear', 1.0)   # Much slower max change rate  
-        self.declare_parameter('max_rate_angular', 1.0)  # Much slower max change rate
-        self.declare_parameter('release_decel_factor', 0.2)  # Much slower deceleration on release
+        self.declare_parameter('smoothing_alpha', 0.5)  # More smoothing
+        self.declare_parameter('max_rate_linear', 1.0)   # slower max change rate  
+        self.declare_parameter('max_rate_angular', 1.0)  # slower max change rate
+        self.declare_parameter('release_decel_factor', 0.1)  # Much slower deceleration on release
         
         self.robot_pc_ip = self.get_parameter('robot_pc_ip').value
         self.robot_pc_port = self.get_parameter('robot_pc_port').value

@@ -48,21 +48,21 @@ private:
     
     // Trajectory parameters - designed to prevent acceleration discontinuities
     struct TrajParams {
-        double max_velocity = 0.08;           // 8cm/s
-        double max_acceleration = 0.04;       // 4cm/s² - conservative
-        double max_jerk = 0.05;              // 5cm/s³ - jerk limiting
+        double max_velocity = 0.8;           // 8cm/s
+        double max_acceleration = 0.05;       // 5cm/s² - conservative
+        double max_jerk = 0.1;              // 10cm/s³ - jerk limiting
         double max_angular_velocity = 0.3;    // 0.3 rad/s
         double max_angular_acceleration = 0.15; // 0.15 rad/s²
         double max_angular_jerk = 0.2;        // 0.2 rad/s³
         
         // Input processing
-        double input_filter_freq = 20.0;     // 20Hz low-pass filter
+        double input_filter_freq = 50.0;     // 50Hz low-pass filter
         double deadzone_linear = 0.005;
         double deadzone_angular = 0.01;
         
         // Trajectory timing
         double trajectory_dt = 0.001;        // 1ms trajectory resolution
-        double lookahead_time = 0.05;         // 50ms lookahead
+        double lookahead_time = 0.02;         // 50ms lookahead
     } params_;
     
     // Current trajectory state
