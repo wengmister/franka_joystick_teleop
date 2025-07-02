@@ -56,13 +56,13 @@ private:
         double max_angular_jerk = 0.2;        // 0.2 rad/s³
         
         // Input processing
-        double input_filter_freq = 50.0;     // 50Hz low-pass filter
+        double input_filter_freq = 100.0;     // 100Hz low-pass filter
         double deadzone_linear = 0.005;
         double deadzone_angular = 0.01;
         
         // Trajectory timing
         double trajectory_dt = 0.001;        // 1ms trajectory resolution
-        double lookahead_time = 0.02;         // 50ms lookahead
+        double lookahead_time = 0.02;         // 20ms lookahead
     } params_;
     
     // Current trajectory state
