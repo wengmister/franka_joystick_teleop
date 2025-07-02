@@ -32,9 +32,21 @@ struct JoystickCommand {
 struct TeleopParams {
     double max_linear_velocity = 0.10;   // Reduced from 0.15 to 0.10 (10cm/s max)
     double max_angular_velocity = 0.03;  // Reduced from 0.05 to 0.03 (0.03 rad/s max)
-    double velocity_smoothing = 0.15;    // Increased smoothing factor
-    double deadzone_linear = 0.002;      // Linear deadzone
-    double deadzone_angular = 0.005;     // Angular deadzone
+    double velocity_smoothing = 0.25;    // Increased smoothing factor from 0.15 to 0.25
+    double deadzone_linear = 0.005;      // Increased linear deadzone from 0.002 to 0.005
+    double deadzone_angular = 0.01;      // Increased angular deadzone from 0.005 to 0.01
+    
+    // Additional smoothing parameters for joystick noise
+    double noise_threshold = 0.02;       // Threshold for aggressive smoothing of tiny values
+    double noise_smoothing = 0.8;        // Very aggressive smoothing for noisy inputs
+    
+    // Input filtering parameters (smooth raw joystick before velocity conversion)
+    double input_smoothing = 0.8;        // Much more aggressive smoothing factor (was 0.4)
+    double input_max_change = 0.005;     // Much smaller maximum allowed change (was 0.02)
+    
+    // Maximum step size constraints (prevents discontinuities)
+    double max_step_size = 0.005;        // Reduced: Maximum position change per step (5mm)
+    double max_angular_step = 0.002;     // Reduced: Maximum angular change per step (0.002 rad ≈ 0.1°)
     
     // Workspace limits (relative to initial pose)
     Eigen::Vector3d workspace_min{-0.3, -0.3, -0.2};  // 30cm workspace
@@ -59,6 +71,9 @@ private:
     Eigen::Affine3d virtual_target_;
     Eigen::Vector3d smoothed_velocity_;
     Eigen::Vector3d smoothed_angular_velocity_;
+    
+    // Smoothed joystick inputs (filter raw inputs before velocity conversion)
+    JoystickCommand smoothed_joystick_inputs_;
     
 public:
     TeleoperationController() : smoothed_velocity_(Eigen::Vector3d::Zero()), 
@@ -172,13 +187,60 @@ public:
     
     void updateVirtualTarget(double dt) {
         // Get current joystick command
-        JoystickCommand cmd;
+        JoystickCommand raw_cmd;
         {
             std::lock_guard<std::mutex> lock(command_mutex_);
-            cmd = current_command_;
+            raw_cmd = current_command_;
         }
         
-        // Calculate target velocities from joystick input
+        // Apply input filtering to smooth raw joystick inputs (prevents large jumps)
+        smoothed_joystick_inputs_.linear_x = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_x + 
+                                            config_.input_smoothing * raw_cmd.linear_x;
+        smoothed_joystick_inputs_.linear_y = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_y + 
+                                            config_.input_smoothing * raw_cmd.linear_y;
+        smoothed_joystick_inputs_.linear_z = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_z + 
+                                            config_.input_smoothing * raw_cmd.linear_z;
+        smoothed_joystick_inputs_.angular_x = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_x + 
+                                             config_.input_smoothing * raw_cmd.angular_x;
+        smoothed_joystick_inputs_.angular_y = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_y + 
+                                             config_.input_smoothing * raw_cmd.angular_y;
+        smoothed_joystick_inputs_.angular_z = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_z + 
+                                             config_.input_smoothing * raw_cmd.angular_z;
+        
+        // Apply maximum change limiting to smoothed inputs (prevent sudden jumps)
+        auto clamp_change = [this](double current, double previous) -> double {
+            double change = current - previous;
+            if (std::abs(change) > config_.input_max_change) {
+                return previous + std::copysign(config_.input_max_change, change);
+            }
+            return current;
+        };
+        
+        static JoystickCommand prev_smoothed = smoothed_joystick_inputs_;
+        smoothed_joystick_inputs_.linear_x = clamp_change(smoothed_joystick_inputs_.linear_x, prev_smoothed.linear_x);
+        smoothed_joystick_inputs_.linear_y = clamp_change(smoothed_joystick_inputs_.linear_y, prev_smoothed.linear_y);
+        smoothed_joystick_inputs_.linear_z = clamp_change(smoothed_joystick_inputs_.linear_z, prev_smoothed.linear_z);
+        smoothed_joystick_inputs_.angular_x = clamp_change(smoothed_joystick_inputs_.angular_x, prev_smoothed.angular_x);
+        smoothed_joystick_inputs_.angular_y = clamp_change(smoothed_joystick_inputs_.angular_y, prev_smoothed.angular_y);
+        smoothed_joystick_inputs_.angular_z = clamp_change(smoothed_joystick_inputs_.angular_z, prev_smoothed.angular_z);
+        prev_smoothed = smoothed_joystick_inputs_;
+        
+        // Copy flags (don't smooth boolean values)
+        smoothed_joystick_inputs_.emergency_stop = raw_cmd.emergency_stop;
+        smoothed_joystick_inputs_.reset_pose = raw_cmd.reset_pose;
+        
+        // Use filtered joystick inputs for velocity calculation
+        JoystickCommand cmd = smoothed_joystick_inputs_;
+        
+        // Debug: Show input filtering effect occasionally
+        static int filter_debug_count = 0;
+        filter_debug_count++;
+        if (filter_debug_count % 100 == 0 && (std::abs(raw_cmd.linear_x) > 0.01 || std::abs(raw_cmd.linear_y) > 0.01 || std::abs(raw_cmd.linear_z) > 0.01)) {
+            std::cout << "INPUT FILTERING: Raw[" << raw_cmd.linear_x << "," << raw_cmd.linear_y << "," << raw_cmd.linear_z 
+                      << "] -> Filtered[" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
+        }
+        
+        // Calculate target velocities from filtered joystick input
         Eigen::Vector3d target_vel;
         target_vel[0] = cmd.linear_y * config_.max_linear_velocity;    // forward/backward
         target_vel[1] = -cmd.linear_x * config_.max_linear_velocity;   // left/right  
@@ -189,30 +251,79 @@ public:
         target_angular_vel[1] = cmd.angular_y * config_.max_angular_velocity;
         target_angular_vel[2] = cmd.angular_z * config_.max_angular_velocity;
         
-        // Apply exponential smoothing to velocities
-        smoothed_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_velocity_ + 
-                            config_.velocity_smoothing * target_vel;
-        smoothed_angular_velocity_ = (1.0 - config_.velocity_smoothing) * smoothed_angular_velocity_ + 
-                                   config_.velocity_smoothing * target_angular_vel;
+        // Apply extra aggressive smoothing for very small noisy inputs
+        double smoothing_factor = config_.velocity_smoothing;
+        if (target_vel.norm() < config_.noise_threshold) {
+            smoothing_factor = config_.noise_smoothing;  // Much more aggressive smoothing for noise
+        }
         
-        // Apply deadzone to smoothed velocities
+        // Apply adaptive exponential smoothing to velocities
+        smoothed_velocity_ = (1.0 - smoothing_factor) * smoothed_velocity_ + 
+                            smoothing_factor * target_vel;
+        smoothed_angular_velocity_ = (1.0 - smoothing_factor) * smoothed_angular_velocity_ + 
+                                   smoothing_factor * target_angular_vel;
+        
+        // Apply smooth deadzone to smoothed velocities (prevents discontinuities)
         for (int i = 0; i < 3; i++) {
+            // Smooth linear deadzone using a cubic transition
             if (std::abs(smoothed_velocity_[i]) < config_.deadzone_linear) {
-                smoothed_velocity_[i] = 0.0;
+                double ratio = std::abs(smoothed_velocity_[i]) / config_.deadzone_linear;
+                double smooth_factor = ratio * ratio * (3.0 - 2.0 * ratio); // Smooth cubic transition
+                smoothed_velocity_[i] *= smooth_factor;
             }
+            
+            // Smooth angular deadzone using a cubic transition
             if (std::abs(smoothed_angular_velocity_[i]) < config_.deadzone_angular) {
-                smoothed_angular_velocity_[i] = 0.0;
+                double ratio = std::abs(smoothed_angular_velocity_[i]) / config_.deadzone_angular;
+                double smooth_factor = ratio * ratio * (3.0 - 2.0 * ratio); // Smooth cubic transition
+                smoothed_angular_velocity_[i] *= smooth_factor;
             }
         }
         
-        // Update virtual target position using smoothed velocities
-        virtual_target_.translation() += smoothed_velocity_ * dt;
+        // Additional micro-motion suppression for ultra-small velocities
+        for (int i = 0; i < 3; i++) {
+            if (std::abs(smoothed_velocity_[i]) < 0.0001) {  // 0.1mm/s threshold
+                smoothed_velocity_[i] *= 0.1;  // Heavily suppress micro-motions
+            }
+            if (std::abs(smoothed_angular_velocity_[i]) < 0.0001) {  // Very small angular threshold
+                smoothed_angular_velocity_[i] *= 0.1;  // Heavily suppress micro-rotations
+            }
+        }
         
-        // Update virtual target orientation using smoothed angular velocities
+        // Update virtual target position using smoothed velocities with step size clamping
+        Eigen::Vector3d desired_position_change = smoothed_velocity_ * dt;
+        
+        // Clamp position change to maximum step size to prevent discontinuities
+        if (desired_position_change.norm() > config_.max_step_size) {
+            double original_norm = desired_position_change.norm();
+            desired_position_change = desired_position_change.normalized() * config_.max_step_size;
+            static int clamp_count = 0;
+            clamp_count++;
+            if (clamp_count % 50 == 0) {  // Report every 50th clamping event
+                std::cout << "STEP CLAMPING: Reduced step from " << original_norm 
+                          << " to " << config_.max_step_size << " (factor " << (original_norm/config_.max_step_size) << ")" << std::endl;
+            }
+        }
+        
+        virtual_target_.translation() += desired_position_change;
+        
+        // Update virtual target orientation using smoothed angular velocities with step clamping
         if (smoothed_angular_velocity_.norm() > 1e-6) {
-            double angle = smoothed_angular_velocity_.norm() * dt;
+            double desired_angle = smoothed_angular_velocity_.norm() * dt;
+            
+            // Clamp angular change to maximum angular step size
+            if (desired_angle > config_.max_angular_step) {
+                static int angular_clamp_count = 0;
+                angular_clamp_count++;
+                if (angular_clamp_count % 50 == 0) {  // Report every 50th clamping event
+                    std::cout << "ANGULAR STEP CLAMPING: Reduced angle from " << desired_angle 
+                              << " to " << config_.max_angular_step << std::endl;
+                }
+                desired_angle = config_.max_angular_step;
+            }
+            
             Eigen::Vector3d axis = smoothed_angular_velocity_.normalized();
-            Eigen::AngleAxisd delta_rot(angle, axis);
+            Eigen::AngleAxisd delta_rot(desired_angle, axis);
             virtual_target_.linear() = virtual_target_.linear() * delta_rot.toRotationMatrix();
         }
         
