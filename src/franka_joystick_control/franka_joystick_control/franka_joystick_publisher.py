@@ -57,19 +57,21 @@ class FrankaJoystickPublisher(Node):
         
         # Smoothing state
         self.smoothed_values = {
-            'linear_x': 0.0, 'linear_y': 0.0, 'linear_z': 0.0,
-            'angular_x': 0.0, 'angular_y': 0.0, 'angular_z': 0.0
+            'axis0': 0.0, 'axis1': 0.0, 'axis2': 0.0, 'axis3': 0.0,
+            'axis4': 0.0, 'axis5': 0.0, 'axis6': 0.0, 'axis7': 0.0
         }
         self.last_time = time.time()
         self.first_callback = True
         
         self.get_logger().info('Franka Joystick Publisher started with smoothing')
-        self.get_logger().info('Controls:')
-        self.get_logger().info('  Left stick: X/Y movement')
-        self.get_logger().info('  Right stick: Z movement / Z rotation')
-        self.get_logger().info('  Triggers: X/Y rotation')
+        self.get_logger().info('NEW CONTROL MAPPING:')
+        self.get_logger().info('  D-pad (axes 6,7): Robot translation (forward/back, left/right)')
+        self.get_logger().info('  Left stick (axes 0,1): End-effector orientation (yaw/pitch)')
+        self.get_logger().info('  Right stick (axes 3,4): Z-movement + roll rotation')
+        self.get_logger().info('  Triggers (axes 2,5): Currently unused')
         self.get_logger().info('  A button: Reset pose')
         self.get_logger().info('  B button: Emergency stop')
+        self.get_logger().info('Raw 8-axis values are sent directly to robot client')
     
     def apply_deadzone(self, value):
         return 0.0 if abs(value) < self.DEADZONE else value
@@ -110,7 +112,9 @@ class FrankaJoystickPublisher(Node):
                 smoothed_val = self.smoothing_alpha * raw_val + (1.0 - self.smoothing_alpha) * prev_smoothed
                 
                 # Then apply rate limiting
-                max_change = (self.max_rate_linear if 'linear' in key else self.max_rate_angular) * dt
+                # Use angular limits for orientation axes (0,1,3), linear limits for translation axes (4,6,7)
+                is_angular_axis = key in ['axis0', 'axis1', 'axis3']  # yaw, pitch, roll
+                max_change = (self.max_rate_angular if is_angular_axis else self.max_rate_linear) * dt
                 change = smoothed_val - prev_smoothed
                 limited_change = self.clamp(change, -max_change, max_change)
                 new_val = prev_smoothed + limited_change
@@ -126,73 +130,48 @@ class FrankaJoystickPublisher(Node):
         return smoothed
     
     def joy_callback(self, msg):
-        # Extract raw joystick values
-        raw_linear_x = raw_linear_y = raw_linear_z = 0.0
-        raw_angular_x = raw_angular_y = raw_angular_z = 0.0
+        # Extract raw joystick axes (8 axes total as expected by robot client)
+        raw_axes = [0.0] * 8  # Initialize 8 axes
         emergency_stop = reset_pose = False
         
-        if len(msg.axes) > max([self.AXIS_LEFT_STICK_HORIZONTAL, self.AXIS_LEFT_STICK_VERTICAL,
-                               self.AXIS_RIGHT_STICK_HORIZONTAL, self.AXIS_RIGHT_STICK_VERTICAL,
-                               self.AXIS_LEFT_TRIGGER, self.AXIS_RIGHT_TRIGGER]):
-            
-            # Linear movement (apply deadzone to raw values)
-            raw_linear_x = self.apply_deadzone(msg.axes[self.AXIS_LEFT_STICK_HORIZONTAL]) * self.LINEAR_SCALE
-            raw_linear_y = self.apply_deadzone(msg.axes[self.AXIS_LEFT_STICK_VERTICAL]) * self.LINEAR_SCALE
-            raw_linear_z = self.apply_deadzone(msg.axes[self.AXIS_RIGHT_STICK_VERTICAL]) * self.LINEAR_SCALE
-            
-            # Angular movement
-            raw_angular_z = self.apply_deadzone(msg.axes[self.AXIS_RIGHT_STICK_HORIZONTAL]) * self.ANGULAR_SCALE
-            
-            # Triggers for X and Y rotation
-            left_trigger = (msg.axes[self.AXIS_LEFT_TRIGGER] + 1.0) / 2.0
-            right_trigger = (msg.axes[self.AXIS_RIGHT_TRIGGER] + 1.0) / 2.0
-            raw_angular_x = (right_trigger - left_trigger) * self.ANGULAR_SCALE
+        # Extract all 8 axes from joystick message, applying deadzone
+        if len(msg.axes) >= 8:
+            for i in range(8):
+                raw_axes[i] = self.apply_deadzone(msg.axes[i])
+        else:
+            # Handle case where joystick has fewer than 8 axes
+            for i in range(min(len(msg.axes), 8)):
+                raw_axes[i] = self.apply_deadzone(msg.axes[i])
         
         # Check buttons
         if len(msg.buttons) > max([self.BUTTON_A, self.BUTTON_B]):
             emergency_stop = bool(msg.buttons[self.BUTTON_B])
             reset_pose = bool(msg.buttons[self.BUTTON_A])
         
-        # Apply smoothing and rate limiting
+        # Apply smoothing and rate limiting to raw axes
         raw_values = {
-            'linear_x': raw_linear_x, 'linear_y': raw_linear_y, 'linear_z': raw_linear_z,
-            'angular_x': raw_angular_x, 'angular_y': raw_angular_y, 'angular_z': raw_angular_z
+            'axis0': raw_axes[0], 'axis1': raw_axes[1], 'axis2': raw_axes[2], 'axis3': raw_axes[3],
+            'axis4': raw_axes[4], 'axis5': raw_axes[5], 'axis6': raw_axes[6], 'axis7': raw_axes[7]
         }
         
         smoothed = self.apply_smoothing_and_rate_limiting(raw_values)
         
-        # Send smoothed command
-        self.send_command(smoothed['linear_x'], smoothed['linear_y'], smoothed['linear_z'], 
-                         smoothed['angular_x'], smoothed['angular_y'], smoothed['angular_z'],
+        # Send smoothed command with 8 axes
+        self.send_command(smoothed['axis0'], smoothed['axis1'], smoothed['axis2'], smoothed['axis3'],
+                         smoothed['axis4'], smoothed['axis5'], smoothed['axis6'], smoothed['axis7'],
                          emergency_stop, reset_pose)
         
-        # Debug output - show both raw and smoothed for significant changes
-        if (abs(smoothed['linear_x']) > 0.01 or abs(smoothed['linear_y']) > 0.01 or abs(smoothed['linear_z']) > 0.01 or
-            abs(smoothed['angular_x']) > 0.01 or abs(smoothed['angular_y']) > 0.01 or abs(smoothed['angular_z']) > 0.01 or
-            emergency_stop or reset_pose):
-            
-            # Check if there's significant smoothing happening
-            max_diff = max(abs(raw_values[k] - smoothed[k]) for k in raw_values)
-            if max_diff > 0.05:  # Show raw vs smoothed when there's significant difference
-                self.get_logger().info(
-                    f'Raw: [{raw_linear_x:.2f}, {raw_linear_y:.2f}, {raw_linear_z:.2f}] '
-                    f'[{raw_angular_x:.2f}, {raw_angular_y:.2f}, {raw_angular_z:.2f}]'
-                )
-                self.get_logger().info(
-                    f'Smoothed: [{smoothed["linear_x"]:.2f}, {smoothed["linear_y"]:.2f}, {smoothed["linear_z"]:.2f}] '
-                    f'[{smoothed["angular_x"]:.2f}, {smoothed["angular_y"]:.2f}, {smoothed["angular_z"]:.2f}] '
-                    f'E-Stop: {"YES" if emergency_stop else "NO"} Reset: {"YES" if reset_pose else "NO"}'
-                )
-            else:
-                self.get_logger().info(
-                    f'Lin: [{smoothed["linear_x"]:.2f}, {smoothed["linear_y"]:.2f}, {smoothed["linear_z"]:.2f}] '
-                    f'Ang: [{smoothed["angular_x"]:.2f}, {smoothed["angular_y"]:.2f}, {smoothed["angular_z"]:.2f}] '
-                    f'E-Stop: {"YES" if emergency_stop else "NO"} '
-                    f'Reset: {"YES" if reset_pose else "NO"}'
-                )
+        # Debug output - show raw axes for significant changes
+        if (any(abs(smoothed[f'axis{i}']) > 0.01 for i in range(8)) or emergency_stop or reset_pose):
+            self.get_logger().info(
+                f'Axes: [{smoothed["axis0"]:.2f}, {smoothed["axis1"]:.2f}, {smoothed["axis2"]:.2f}, {smoothed["axis3"]:.2f}, '
+                f'{smoothed["axis4"]:.2f}, {smoothed["axis5"]:.2f}, {smoothed["axis6"]:.2f}, {smoothed["axis7"]:.2f}] '
+                f'E-Stop: {"YES" if emergency_stop else "NO"} '
+                f'Reset: {"YES" if reset_pose else "NO"}'
+            )
     
-    def send_command(self, lx, ly, lz, ax, ay, az, estop, reset):
-        command = f'{lx} {ly} {lz} {ax} {ay} {az} {int(estop)} {int(reset)}'
+    def send_command(self, axis0, axis1, axis2, axis3, axis4, axis5, axis6, axis7, estop, reset):
+        command = f'{axis0} {axis1} {axis2} {axis3} {axis4} {axis5} {axis6} {axis7} {int(estop)} {int(reset)}'
         
         try:
             self.sock.sendto(command.encode(), (self.robot_pc_ip, self.robot_pc_port))

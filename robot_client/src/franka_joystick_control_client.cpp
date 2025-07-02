@@ -1,5 +1,14 @@
 // Modern franka_joystick_control_client.cpp - Using external control loop
 // Copyright (c) 2024 - Based on Franka examples
+//
+// NEW JOYSTICK CONTROL MAPPING:
+// =============================
+// D-pad (axes 6,7):    Robot translation (forward/back, left/right)
+// Left stick (axes 0,1):   End-effector orientation (yaw/pitch)  
+// Right stick (axes 3,4):  Z-movement (vertical) + roll rotation
+// Triggers (axes 2,5):     Unused
+//
+// Motion is smoothed and step-limited to prevent discontinuities
 #include <cmath>
 #include <iostream>
 #include <thread>
@@ -19,12 +28,16 @@
 #include "examples_common.h"
 
 struct JoystickCommand {
-    double linear_x = 0.0;
-    double linear_y = 0.0; 
-    double linear_z = 0.0;
-    double angular_x = 0.0;
-    double angular_y = 0.0;
-    double angular_z = 0.0;
+    // 8 joystick axes
+    double axis0 = 0.0;  // left horizontal -> yaw
+    double axis1 = 0.0;  // left vertical -> pitch  
+    double axis2 = 0.0;  // left trigger (unused)
+    double axis3 = 0.0;  // right horizontal -> roll
+    double axis4 = 0.0;  // right vertical -> z movement
+    double axis5 = 0.0;  // right trigger (unused)
+    double axis6 = 0.0;  // dpad horizontal -> right/left
+    double axis7 = 0.0;  // dpad vertical -> forward/backward
+    
     bool emergency_stop = false;
     bool reset_pose = false;
 };
@@ -121,20 +134,18 @@ public:
                 buffer[bytes_received] = '\0';
                 
                 JoystickCommand cmd;
-                int parsed_count = sscanf(buffer, "%lf %lf %lf %lf %lf %lf %d %d",
-                          &cmd.linear_x, &cmd.linear_y, &cmd.linear_z,
-                          &cmd.angular_x, &cmd.angular_y, &cmd.angular_z,
+                int parsed_count = sscanf(buffer, "%lf %lf %lf %lf %lf %lf %lf %lf %d %d",
+                          &cmd.axis0, &cmd.axis1, &cmd.axis2, &cmd.axis3, &cmd.axis4, &cmd.axis5, &cmd.axis6, &cmd.axis7,
                           (int*)&cmd.emergency_stop, (int*)&cmd.reset_pose);
                 
-                if (parsed_count == 8) {
+                if (parsed_count == 10) {
                     // Debug: Show parsed values
                     static int debug_count = 0;
                     debug_count++;
                     if (debug_count % 100 == 0 || cmd.reset_pose || cmd.emergency_stop) {  // Every 100th message or if flags set
                         std::cout << "UDP DEBUG: Raw buffer: [" << buffer << "]" << std::endl;
-                        std::cout << "UDP DEBUG: Parsed - Linear:[" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z 
-                                  << "] Angular:[" << cmd.angular_x << "," << cmd.angular_y << "," << cmd.angular_z 
-                                  << "] E-Stop:" << cmd.emergency_stop << " Reset:" << cmd.reset_pose << std::endl;
+                        std::cout << "UDP DEBUG: Parsed - Axes:[" << cmd.axis0 << "," << cmd.axis1 << "," << cmd.axis2 << "," << cmd.axis3 << "," << cmd.axis4 << "," << cmd.axis5 << "," << cmd.axis6 << "," << cmd.axis7 << "]" << std::endl;
+                        std::cout << "UDP DEBUG: E-Stop:" << cmd.emergency_stop << " Reset:" << cmd.reset_pose << std::endl;
                     }
                     
                     std::lock_guard<std::mutex> lock(command_mutex_);
@@ -150,13 +161,15 @@ public:
                     }
                     
                     // Debug output for non-zero commands
-                    if (std::abs(cmd.linear_x) > 0.01 || std::abs(cmd.linear_y) > 0.01 || std::abs(cmd.linear_z) > 0.01) {
-                        std::cout << "Joystick: Left[" << cmd.linear_x << "," << cmd.linear_y 
-                                  << "] Right[" << cmd.linear_z << "] -> Robot[fwd=" << cmd.linear_y 
-                                  << ", right=" << -cmd.linear_x << ", up=" << cmd.linear_z << "]" << std::endl;
+                    if (std::abs(cmd.axis0) > 0.01 || std::abs(cmd.axis1) > 0.01 || std::abs(cmd.axis2) > 0.01 ||
+                        std::abs(cmd.axis3) > 0.01 || std::abs(cmd.axis4) > 0.01 || std::abs(cmd.axis6) > 0.01 ||
+                        std::abs(cmd.axis7) > 0.01) {
+                        std::cout << "Joystick: Left[" << cmd.axis0 << "," << cmd.axis1 << "," << cmd.axis2 << "]"
+                                  << " Right[" << cmd.axis3 << "," << cmd.axis4 << "," << cmd.axis5 << "]"
+                                  << " Dpad[" << cmd.axis6 << "," << cmd.axis7 << "]" << std::endl;
                     }
                 } else {
-                    std::cout << "UDP WARNING: Received malformed packet, parsed " << parsed_count << " values instead of 8" << std::endl;
+                    std::cout << "UDP WARNING: Received malformed packet, parsed " << parsed_count << " values instead of 10" << std::endl;
                     std::cout << "UDP WARNING: Raw buffer: [" << buffer << "]" << std::endl;
                 }
             }
@@ -194,18 +207,22 @@ public:
         }
         
         // Apply input filtering to smooth raw joystick inputs (prevents large jumps)
-        smoothed_joystick_inputs_.linear_x = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_x + 
-                                            config_.input_smoothing * raw_cmd.linear_x;
-        smoothed_joystick_inputs_.linear_y = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_y + 
-                                            config_.input_smoothing * raw_cmd.linear_y;
-        smoothed_joystick_inputs_.linear_z = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.linear_z + 
-                                            config_.input_smoothing * raw_cmd.linear_z;
-        smoothed_joystick_inputs_.angular_x = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_x + 
-                                             config_.input_smoothing * raw_cmd.angular_x;
-        smoothed_joystick_inputs_.angular_y = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_y + 
-                                             config_.input_smoothing * raw_cmd.angular_y;
-        smoothed_joystick_inputs_.angular_z = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.angular_z + 
-                                             config_.input_smoothing * raw_cmd.angular_z;
+        smoothed_joystick_inputs_.axis0 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis0 + 
+                                            config_.input_smoothing * raw_cmd.axis0;
+        smoothed_joystick_inputs_.axis1 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis1 + 
+                                            config_.input_smoothing * raw_cmd.axis1;
+        smoothed_joystick_inputs_.axis2 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis2 + 
+                                            config_.input_smoothing * raw_cmd.axis2;
+        smoothed_joystick_inputs_.axis3 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis3 + 
+                                             config_.input_smoothing * raw_cmd.axis3;
+        smoothed_joystick_inputs_.axis4 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis4 + 
+                                             config_.input_smoothing * raw_cmd.axis4;
+        smoothed_joystick_inputs_.axis5 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis5 + 
+                                             config_.input_smoothing * raw_cmd.axis5;
+        smoothed_joystick_inputs_.axis6 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis6 + 
+                                             config_.input_smoothing * raw_cmd.axis6;
+        smoothed_joystick_inputs_.axis7 = (1.0 - config_.input_smoothing) * smoothed_joystick_inputs_.axis7 + 
+                                             config_.input_smoothing * raw_cmd.axis7;
         
         // Apply maximum change limiting to smoothed inputs (prevent sudden jumps)
         auto clamp_change = [this](double current, double previous) -> double {
@@ -217,12 +234,14 @@ public:
         };
         
         static JoystickCommand prev_smoothed = smoothed_joystick_inputs_;
-        smoothed_joystick_inputs_.linear_x = clamp_change(smoothed_joystick_inputs_.linear_x, prev_smoothed.linear_x);
-        smoothed_joystick_inputs_.linear_y = clamp_change(smoothed_joystick_inputs_.linear_y, prev_smoothed.linear_y);
-        smoothed_joystick_inputs_.linear_z = clamp_change(smoothed_joystick_inputs_.linear_z, prev_smoothed.linear_z);
-        smoothed_joystick_inputs_.angular_x = clamp_change(smoothed_joystick_inputs_.angular_x, prev_smoothed.angular_x);
-        smoothed_joystick_inputs_.angular_y = clamp_change(smoothed_joystick_inputs_.angular_y, prev_smoothed.angular_y);
-        smoothed_joystick_inputs_.angular_z = clamp_change(smoothed_joystick_inputs_.angular_z, prev_smoothed.angular_z);
+        smoothed_joystick_inputs_.axis0 = clamp_change(smoothed_joystick_inputs_.axis0, prev_smoothed.axis0);
+        smoothed_joystick_inputs_.axis1 = clamp_change(smoothed_joystick_inputs_.axis1, prev_smoothed.axis1);
+        smoothed_joystick_inputs_.axis2 = clamp_change(smoothed_joystick_inputs_.axis2, prev_smoothed.axis2);
+        smoothed_joystick_inputs_.axis3 = clamp_change(smoothed_joystick_inputs_.axis3, prev_smoothed.axis3);
+        smoothed_joystick_inputs_.axis4 = clamp_change(smoothed_joystick_inputs_.axis4, prev_smoothed.axis4);
+        smoothed_joystick_inputs_.axis5 = clamp_change(smoothed_joystick_inputs_.axis5, prev_smoothed.axis5);
+        smoothed_joystick_inputs_.axis6 = clamp_change(smoothed_joystick_inputs_.axis6, prev_smoothed.axis6);
+        smoothed_joystick_inputs_.axis7 = clamp_change(smoothed_joystick_inputs_.axis7, prev_smoothed.axis7);
         prev_smoothed = smoothed_joystick_inputs_;
         
         // Copy flags (don't smooth boolean values)
@@ -235,21 +254,27 @@ public:
         // Debug: Show input filtering effect occasionally
         static int filter_debug_count = 0;
         filter_debug_count++;
-        if (filter_debug_count % 100 == 0 && (std::abs(raw_cmd.linear_x) > 0.01 || std::abs(raw_cmd.linear_y) > 0.01 || std::abs(raw_cmd.linear_z) > 0.01)) {
-            std::cout << "INPUT FILTERING: Raw[" << raw_cmd.linear_x << "," << raw_cmd.linear_y << "," << raw_cmd.linear_z 
-                      << "] -> Filtered[" << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
+        if (filter_debug_count % 100 == 0 && (std::abs(raw_cmd.axis0) > 0.01 || std::abs(raw_cmd.axis1) > 0.01 || std::abs(raw_cmd.axis2) > 0.01 ||
+            std::abs(raw_cmd.axis3) > 0.01 || std::abs(raw_cmd.axis4) > 0.01 || std::abs(raw_cmd.axis6) > 0.01 ||
+            std::abs(raw_cmd.axis7) > 0.01)) {
+            std::cout << "INPUT FILTERING: Raw[" << raw_cmd.axis0 << "," << raw_cmd.axis1 << "," << raw_cmd.axis2 << "," << raw_cmd.axis3 << "," << raw_cmd.axis4 << "," << raw_cmd.axis5 << "," << raw_cmd.axis6 << "," << raw_cmd.axis7 << "]"
+                      << " -> Filtered[" << cmd.axis0 << "," << cmd.axis1 << "," << cmd.axis2 << "," << cmd.axis3 << "," << cmd.axis4 << "," << cmd.axis5 << "," << cmd.axis6 << "," << cmd.axis7 << "]" << std::endl;
         }
         
-        // Calculate target velocities from filtered joystick input
+        // Calculate target velocities from joystick input
+        // NEW CONTROL MAPPING:
+        // - D-pad controls robot translation (forward/back, left/right)  
+        // - Left joystick controls end-effector orientation (pitch/yaw)
+        // - Right joystick controls Z-movement and roll
         Eigen::Vector3d target_vel;
-        target_vel[0] = cmd.linear_y * config_.max_linear_velocity;    // forward/backward
-        target_vel[1] = -cmd.linear_x * config_.max_linear_velocity;   // left/right  
-        target_vel[2] = cmd.linear_z * config_.max_linear_velocity;    // up/down
+        target_vel[0] = cmd.axis7 * config_.max_linear_velocity;    // D-pad vertical -> forward/backward
+        target_vel[1] = -cmd.axis6 * config_.max_linear_velocity;   // D-pad horizontal -> left/right (inverted)
+        target_vel[2] = cmd.axis4 * config_.max_linear_velocity;    // Right stick vertical -> up/down
         
         Eigen::Vector3d target_angular_vel;
-        target_angular_vel[0] = cmd.angular_x * config_.max_angular_velocity;
-        target_angular_vel[1] = cmd.angular_y * config_.max_angular_velocity;
-        target_angular_vel[2] = cmd.angular_z * config_.max_angular_velocity;
+        target_angular_vel[0] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> roll
+        target_angular_vel[1] = cmd.axis1 * config_.max_angular_velocity;  // Left stick vertical -> pitch  
+        target_angular_vel[2] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> yaw
         
         // Apply extra aggressive smoothing for very small noisy inputs
         double smoothing_factor = config_.velocity_smoothing;
@@ -341,19 +366,23 @@ public:
         
         if (iteration <= 10) {
             std::cout << "DEBUG updateVirtualTarget: dt=" << dt << ", joystick=[" 
-                      << cmd.linear_x << "," << cmd.linear_y << "," << cmd.linear_z << "]" << std::endl;
+                      << cmd.axis0 << "," << cmd.axis1 << "," << cmd.axis2 << "," << cmd.axis3 << "," << cmd.axis4 << "," << cmd.axis5 << "," << cmd.axis6 << "," << cmd.axis7 << "]" << std::endl;
         }
         
         // Calculate target velocities from joystick input
+        // NEW CONTROL MAPPING:
+        // - D-pad controls robot translation (forward/back, left/right)  
+        // - Left joystick controls end-effector orientation (pitch/yaw)
+        // - Right joystick controls Z-movement and roll
         Eigen::Vector3d target_vel;
-        target_vel[0] = cmd.linear_y * config_.max_linear_velocity;    // forward/backward
-        target_vel[1] = -cmd.linear_x * config_.max_linear_velocity;   // left/right  
-        target_vel[2] = cmd.linear_z * config_.max_linear_velocity;    // up/down
+        target_vel[0] = cmd.axis7 * config_.max_linear_velocity;    // D-pad vertical -> forward/backward
+        target_vel[1] = -cmd.axis6 * config_.max_linear_velocity;   // D-pad horizontal -> left/right (inverted)
+        target_vel[2] = cmd.axis4 * config_.max_linear_velocity;    // Right stick vertical -> up/down
         
         Eigen::Vector3d target_angular_vel;
-        target_angular_vel[0] = cmd.angular_x * config_.max_angular_velocity;
-        target_angular_vel[1] = cmd.angular_y * config_.max_angular_velocity;
-        target_angular_vel[2] = cmd.angular_z * config_.max_angular_velocity;
+        target_angular_vel[0] = cmd.axis3 * config_.max_angular_velocity;  // Right stick horizontal -> roll
+        target_angular_vel[1] = cmd.axis1 * config_.max_angular_velocity;  // Left stick vertical -> pitch  
+        target_angular_vel[2] = cmd.axis0 * config_.max_angular_velocity;  // Left stick horizontal -> yaw
         
         if (iteration <= 10) {
             std::cout << "DEBUG: target_vel=[" << target_vel.transpose() << "]" << std::endl;
