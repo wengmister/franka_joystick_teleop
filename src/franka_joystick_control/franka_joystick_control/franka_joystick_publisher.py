@@ -16,10 +16,10 @@ class FrankaJoystickPublisher(Node):
         self.declare_parameter('robot_pc_port', 8888)
         
         # Smoothing parameters
-        self.declare_parameter('smoothing_alpha', 0.15)  # Much lower = much more smoothing
-        self.declare_parameter('max_rate_linear', 0.8)   # Much slower max change rate  
+        self.declare_parameter('smoothing_alpha', 0.2)  # More smoothing
+        self.declare_parameter('max_rate_linear', 1.0)   # Much slower max change rate  
         self.declare_parameter('max_rate_angular', 1.0)  # Much slower max change rate
-        self.declare_parameter('release_decel_factor', 0.02)  # Much slower deceleration on release
+        self.declare_parameter('release_decel_factor', 0.2)  # Much slower deceleration on release
         
         self.robot_pc_ip = self.get_parameter('robot_pc_ip').value
         self.robot_pc_port = self.get_parameter('robot_pc_port').value
@@ -163,8 +163,8 @@ class FrankaJoystickPublisher(Node):
         # Debug output - show raw axes for significant changes
         if (any(abs(smoothed[f'axis{i}']) > 0.01 for i in range(8)) or emergency_stop or reset_pose):
             self.get_logger().info(
-                f'Axes: [{smoothed["axis0"]:.2f}, {smoothed["axis1"]:.2f}, {smoothed["axis2"]:.2f}, {smoothed["axis3"]:.2f}, '
-                f'{smoothed["axis4"]:.2f}, {smoothed["axis5"]:.2f}, {smoothed["axis6"]:.2f}, {smoothed["axis7"]:.2f}] '
+                f'Axes: [{smoothed["axis0"]:.5f}, {smoothed["axis1"]:.5f}, {smoothed["axis2"]:.5f}, {smoothed["axis3"]:.5f}, '
+                f'{smoothed["axis4"]:.5f}, {smoothed["axis5"]:.5f}, {smoothed["axis6"]:.5f}, {smoothed["axis7"]:.5f}] '
                 f'E-Stop: {"YES" if emergency_stop else "NO"} '
                 f'Reset: {"YES" if reset_pose else "NO"}'
             )
