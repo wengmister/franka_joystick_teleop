@@ -98,38 +98,47 @@ ros2 launch franka_joystick_control joystick_control.launch.py
 
 2. **On Local Machine**:
    ```bash
-   source /opt/ros/humble/setup.bash
-   source ~/franka_ws/install/setup.bash
+   source [path_to_franka_joyostick_teleop]/install/setup.bash
    ros2 launch franka_joystick_control joystick_control.launch.py
    ```
 
 That's it! Your joystick should now control the Franka robot over the ethernet connection.
 
-## Customization
-
-### Modifying Control Mapping:
-Edit the axis/button mappings in the joystick publisher:
-```python
-self.AXIS_LEFT_STICK_HORIZONTAL = 0  # Change these values
-self.BUTTON_A = 0                    # for different controllers
-```
-
-### Adjusting Movement Speed:
-```python
-self.LINEAR_SCALE = 1.0   # Reduce for slower movement
-self.ANGULAR_SCALE = 1.0  # Reduce for slower rotation
-```
-
-### Adding More Controls:
-- Modify the UDP command format
-- Add new button/axis mappings
-- Extend the Franka controller to handle new commands
-
 ## Network Protocol
 
-The system uses a simple UDP protocol with space-separated values:
+The system uses a simple UDP protocol with space-separated values to stream all joystick inputs. The axes follow standard `joynode` mapping convention for generic controllers:
+
 ```
-"linear_x linear_y linear_z angular_x angular_y angular_z emergency_stop reset_pose"
+axes: 
+
+-0 (left horizontal) 
+-1 (left vertical) 
+-2 (left trigger) 
+-3 (right horizontal) 
+-4 (right vertical) 
+-5 (right trigger) 
+-6 (dpad horizontal) 
+-7 (dpad vertical) 
 ```
 
-Example: `"0.1 -0.05 0.0 0.0 0.0 0.2 0 0"`
+Example: `"0.1 -0.05 0.0 0.0 0.0 0.2 0.0 0.0 0 0"`
+
+## Filtering scheme
+
+Joystick input tends to be noisy and presents control deadzones. Additionally rapid release of joystick tends to create discontinuities. In order to improve the robustness and smoothness of control, the following filtering scheme are used in this project:
+
+```
+Joystick input
+   - exponential smoothing
+   - release control
+   - deadzoning/zero crossing
+   - clamping
+Trajectory filtering
+   - low pass filter
+   - release damping
+```
+
+## Demo
+
+## License
+MIT
