@@ -182,14 +182,6 @@ private:
         // Apply filtering normally - no hard zeroing
         filtered_linear_input_ = (1.0 - alpha) * filtered_linear_input_ + alpha * desired_linear;
         filtered_angular_input_ = (1.0 - alpha) * filtered_angular_input_ + alpha * desired_angular;
-        
-        // Debug filtered inputs occasionally
-        static int filter_debug_count = 0;
-        filter_debug_count++;
-        if (filter_debug_count % 5000 == 0 && (filtered_linear_input_.norm() > 1e-5 || filtered_angular_input_.norm() > 1e-5)) {
-            std::cout << "Filtered inputs: Lin=[" << filtered_linear_input_.transpose() 
-                      << "] Ang=[" << filtered_angular_input_.transpose() << "]" << std::endl;
-        }
     }
     
     TrajectoryPoint generateNextTrajectoryPoint(double dt) {
@@ -204,9 +196,9 @@ private:
             
             // Apply gentle damping when input is very small
             double damping_factor = 1.0;
-            if (std::abs(desired_vel) < 1e-4) {
+            if (std::abs(desired_vel) < params_.deadzone_linear) {
                 // Gentle exponential decay instead of hard zeroing
-                damping_factor = 0.98;  // Very gentle 2% reduction per iteration
+                damping_factor = 0.99;  // Gentle 1% reduction per iteration
             }
             
             // Limit acceleration based on velocity error
@@ -221,7 +213,7 @@ private:
             next_point.acceleration[i] = current_point_.acceleration[i] + jerk * dt;
             
             // Apply gentle damping to acceleration when no input
-            if (std::abs(desired_vel) < 1e-4) {
+            if (std::abs(desired_vel) < params_.deadzone_linear) {
                 next_point.acceleration[i] *= damping_factor;
             }
             
@@ -233,7 +225,7 @@ private:
             next_point.velocity[i] = current_point_.velocity[i] + next_point.acceleration[i] * dt;
             
             // Apply gentle damping to velocity when no input
-            if (std::abs(desired_vel) < 1e-4) {
+            if (std::abs(desired_vel) < params_.deadzone_linear) {
                 next_point.velocity[i] *= damping_factor;
             }
             
@@ -250,8 +242,8 @@ private:
             
             // Apply gentle damping for angular motion
             double angular_damping_factor = 1.0;
-            if (std::abs(desired_angular_vel) < 1e-4) {
-                angular_damping_factor = 0.98;  // Same gentle damping
+            if (std::abs(desired_angular_vel) < params_.deadzone_angular) {
+                angular_damping_factor = 0.98;  // Slightly faster damping
             }
             
             double desired_angular_accel = angular_vel_error / dt;
@@ -263,7 +255,7 @@ private:
             next_point.angular_acceleration[i] = current_point_.angular_acceleration[i] + angular_jerk * dt;
             
             // Apply gentle damping to angular acceleration
-            if (std::abs(desired_angular_vel) < 1e-4) {
+            if (std::abs(desired_angular_vel) < params_.deadzone_angular) {
                 next_point.angular_acceleration[i] *= angular_damping_factor;
             }
             
@@ -273,7 +265,7 @@ private:
             next_point.angular_velocity[i] = current_point_.angular_velocity[i] + next_point.angular_acceleration[i] * dt;
             
             // Apply gentle damping to angular velocity
-            if (std::abs(desired_angular_vel) < 1e-4) {
+            if (std::abs(desired_angular_vel) < params_.deadzone_angular) {
                 next_point.angular_velocity[i] *= angular_damping_factor;
             }
             
@@ -399,10 +391,10 @@ private:
         
         std::this_thread::sleep_for(std::chrono::seconds(1));
         
-        static int iteration_count = 0;
+        int iteration_count = 0;
         
-        auto trajectory_generator = [this, &iteration_count]
-                                   (const franka::RobotState& robot_state, franka::Duration period) -> franka::CartesianPose {
+        auto trajectory_generator = [this, iteration_count = 0]
+                                   (const franka::RobotState& robot_state, franka::Duration period) mutable -> franka::CartesianPose {
             
             iteration_count++;
             double dt = period.toSec();
@@ -430,7 +422,8 @@ private:
                                            current_point_.angular_velocity.norm() < 1e-3 &&
                                            current_point_.angular_acceleration.norm() < 1e-3);
                     
-                    std::cout << "Traj: pos=" << current_point_.position.norm() 
+                    std::cout << "Traj: pos=[" << current_point_.position.x() << ", "
+                              << current_point_.position.y() << ", " << current_point_.position.z() << "]"
                               << " vel=" << current_point_.velocity.norm()
                               << " accel=" << current_point_.acceleration.norm() 
                               << (is_nearly_stable ? " [NEARLY_STABLE]" : " [MOVING]") << std::endl;
@@ -445,7 +438,8 @@ private:
             std::cout << "Trajectory control finished normally." << std::endl;
         } catch (const franka::ControlException& e) {
             std::cout << "Trajectory control exception: " << e.what() << std::endl;
-            std::cout << "Final state: pos=" << current_point_.position.norm() 
+            std::cout << "Final state: pos=[" << current_point_.position.x() << ", "
+                      << current_point_.position.y() << ", " << current_point_.position.z() << "]"
                       << " vel=" << current_point_.velocity.norm()
                       << " accel=" << current_point_.acceleration.norm() << std::endl;
         }
