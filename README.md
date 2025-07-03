@@ -2,6 +2,10 @@
 
 This system allows you to control a Franka robot using a joystick through ROS2 on your local machine, communicating with libfranka running on a realtime PC at **192.168.18.1**.
 
+This setup requires 2 workstations. One local machine that interfaces with controller for input that runs a python ROS2 node, and a real-time PC that controls franka arm that runs a cpp client to receive instruction and implement control.
+
+The cpp `franka_joystick_control_client` uses `libfranka` with cartesian impedance controller using custom trajectory points converted to `franka::CartesianPose` @ 1k Hz.
+
 ## Architecture
 
 ```
@@ -18,17 +22,18 @@ Local Machine (ROS2)           Ethernet (UDP)        Realtime PC (192.168.18.1)
 
 ## Setup Instructions
 
-### 1. Realtime PC Setup (Assumed 192.168.18.1)
+### 1. Realtime PC Setup (Assumed 192.168.18.1 for `[ROBOT_IP]`)
 
-Under construction.
+1. Connect to Franka Desk at `[ROBOT_IP]/desk/`
+2. Activate FCI
+3. Copy the built `robot client` to realtime PC (you will need to cmake and build `robot_client` first!)
+4. run `./franka_joystick_control_client [ROBOT_IP]`
 
 ### 2. Local Machine Setup (Python Package)
 
-Under construction
-
 1. **Build the package**:
    ```bash
-   cd ~/franka_ws
+   cd ~/ws
    colcon build --packages-select franka_joystick_control
    source install/setup.bash
    ```
@@ -62,9 +67,7 @@ Press Enter to start control loop...
 
 **Simple launch (uses default IP 192.168.18.1)**:
 ```bash
-# Source ROS2
-source /opt/ros/humble/setup.bash
-source ~/franka_ws/install/setup.bash
+source [PATH_TO_JOYSTICK_TELEOP_WS]/install/setup.bash
 
 # Launch with default settings
 ros2 launch franka_joystick_control joystick_control.launch.py
@@ -73,20 +76,15 @@ ros2 launch franka_joystick_control joystick_control.launch.py
 ## Joystick Controls
 
 ### Xbox Controller Layout:
-- **Left Stick**: X/Y movement (horizontal plane)
+- **D-PAD**: X/Y movement (horizontal plane)
 - **Right Stick**: 
   - Vertical: Z movement (up/down)
   - Horizontal: Z rotation (yaw)
-- **Left Trigger**: X rotation (roll, negative direction)
-- **Right Trigger**: X rotation (roll, positive direction)
+- **Left Stick**: 
+  - Vertical: X rotation (row)
+  - Horizontal: Y rotation (pitch)
 - **A Button**: Reset pose to initial position
 - **B Button**: Emergency stop
-
-### Safety Features:
-- **Deadzone**: 0.1 (prevents drift)
-- **Movement limits**: ±50cm from initial position
-- **Emergency stop**: Immediately stops robot motion
-- **Collision detection**: Uses Franka's built-in collision detection
 
 ## Quick Start Summary
 
