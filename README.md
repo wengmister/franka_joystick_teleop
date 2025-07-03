@@ -138,5 +138,7 @@ Trajectory filtering
 
 ## Demo
 
+![joystick](https://github.com/user-attachments/assets/15f8e3d3-8715-4bac-8d14-873e2a712631)
+
 ## License
 MIT
