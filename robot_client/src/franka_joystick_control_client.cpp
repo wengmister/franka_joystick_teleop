@@ -59,10 +59,6 @@ private:
         double input_filter_freq = 100.0;     // 100Hz low-pass filter
         double deadzone_linear = 0.005;
         double deadzone_angular = 0.01;
-        
-        // Trajectory timing
-        double trajectory_dt = 0.001;        // 1ms trajectory resolution
-        double lookahead_time = 0.02;         // 20ms lookahead
     } params_;
     
     // Current trajectory state
@@ -393,6 +389,8 @@ private:
         
         int iteration_count = 0;
         
+        // Main trajectory generator. This is the lambda function that will be called by the robot control loop.
+        // It generates the next Cartesian pose based on joystick input and current trajectory state.
         auto trajectory_generator = [this, iteration_count = 0]
                                    (const franka::RobotState& robot_state, franka::Duration period) mutable -> franka::CartesianPose {
             
